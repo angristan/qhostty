@@ -44,8 +44,7 @@ int main(int argc, char** argv) {
                                            state == Qt::ApplicationActive);
                    });
 
-  MainWindow window(&ghostty);
-  window.show();
+  ghostty.createWindow();
 
   return application.exec();
 }

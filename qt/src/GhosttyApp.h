@@ -7,6 +7,7 @@
 
 #include <ghostty.h>
 
+class MainWindow;
 class TerminalWidget;
 
 class GhosttyApp final : public QObject {
@@ -22,12 +23,12 @@ class GhosttyApp final : public QObject {
   [[nodiscard]] ghostty_app_t handle() const { return m_app; }
   [[nodiscard]] ghostty_config_t config() const { return m_config; }
 
+  MainWindow* createWindow(
+      const ghostty_surface_config_s* baseConfig = nullptr);
+  void registerWindow(MainWindow* window);
+  void unregisterWindow(MainWindow* window);
   void registerSurface(TerminalWidget* widget);
   void unregisterSurface(TerminalWidget* widget);
-
- signals:
-  void newWindowRequested();
-  void quitRequested();
 
  private:
   static void wakeupCallback(void* userdata);
@@ -57,6 +58,7 @@ class GhosttyApp final : public QObject {
 
   ghostty_config_t m_config = nullptr;
   ghostty_app_t m_app = nullptr;
+  QSet<MainWindow*> m_windows;
   QSet<TerminalWidget*> m_surfaces;
   std::atomic_bool m_tickQueued = false;
 };

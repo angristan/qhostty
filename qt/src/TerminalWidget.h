@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QOpenGLWidget>
 
 #include <ghostty.h>
@@ -23,6 +24,12 @@ class TerminalWidget final : public QOpenGLWidget {
   ~TerminalWidget() override;
 
   [[nodiscard]] ghostty_surface_t surface() const { return m_surface; }
+  [[nodiscard]] const QString& title() const { return m_title; }
+  [[nodiscard]] const QString& workingDirectory() const {
+    return m_workingDirectory;
+  }
+  [[nodiscard]] ghostty_surface_config_s inheritedConfig(
+      ghostty_surface_context_e context) const;
 
   bool readClipboard(ghostty_clipboard_e location, void* state);
   void confirmReadClipboard(const char* contents,
@@ -36,6 +43,7 @@ class TerminalWidget final : public QOpenGLWidget {
   bool handleAction(const ghostty_action_s& action);
 
  signals:
+  void focused();
   void titleChanged(const QString& title);
   void closeRequested(TerminalWidget* widget);
   void bellRang();
@@ -86,5 +94,6 @@ class TerminalWidget final : public QOpenGLWidget {
   bool m_composing = false;
   QString m_title;
   QString m_workingDirectory;
+  QByteArray m_workingDirectoryUtf8;
   QSize m_cellSize;
 };

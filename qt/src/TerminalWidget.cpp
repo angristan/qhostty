@@ -35,12 +35,28 @@ TerminalWidget::TerminalWidget(GhosttyApp* app,
   setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
 
   m_config = baseConfig != nullptr ? *baseConfig : ghostty_surface_config_new();
+  if (m_config.working_directory != nullptr) {
+    m_workingDirectory = QString::fromUtf8(m_config.working_directory);
+    m_workingDirectoryUtf8 = m_workingDirectory.toUtf8();
+    m_config.working_directory = nullptr;
+  }
   m_app->registerSurface(this);
 }
 
 TerminalWidget::~TerminalWidget() {
   destroySurface();
   m_app->unregisterSurface(this);
+}
+
+ghostty_surface_config_s TerminalWidget::inheritedConfig(
+    ghostty_surface_context_e context) const {
+  ghostty_surface_config_s config = ghostty_surface_config_new();
+  config.font_size = m_config.font_size;
+  config.working_directory = m_workingDirectoryUtf8.isEmpty()
+                                 ? nullptr
+                                 : m_workingDirectoryUtf8.constData();
+  config.context = context;
+  return config;
 }
 
 bool TerminalWidget::readClipboard(ghostty_clipboard_e location, void* state) {
@@ -170,6 +186,7 @@ bool TerminalWidget::handleAction(const ghostty_action_s& action) {
       return true;
     case GHOSTTY_ACTION_PWD:
       m_workingDirectory = QString::fromUtf8(action.action.pwd.pwd);
+      m_workingDirectoryUtf8 = m_workingDirectory.toUtf8();
       return true;
     case GHOSTTY_ACTION_CELL_SIZE:
       m_cellSize = QSize(static_cast<int>(action.action.cell_size.width),
@@ -214,9 +231,6 @@ bool TerminalWidget::handleAction(const ghostty_action_s& action) {
     }
     case GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD:
       QGuiApplication::clipboard()->setText(m_title);
-      return true;
-    case GHOSTTY_ACTION_CLOSE_WINDOW:
-      emit closeRequested(this);
       return true;
     case GHOSTTY_ACTION_RENDERER_HEALTH:
       setEnabled(action.action.renderer_health ==
@@ -358,6 +372,7 @@ void TerminalWidget::focusInEvent(QFocusEvent* event) {
   if (m_surface != nullptr) {
     ghostty_surface_set_focus(m_surface, true);
   }
+  emit focused();
   QOpenGLWidget::focusInEvent(event);
 }
 
@@ -417,6 +432,9 @@ void TerminalWidget::createSurface() {
   m_config.platform.opengl.get_framebuffer = &TerminalWidget::getFramebuffer;
   m_config.userdata = this;
   m_config.scale_factor = devicePixelRatioF();
+  m_config.working_directory = m_workingDirectoryUtf8.isEmpty()
+                                   ? nullptr
+                                   : m_workingDirectoryUtf8.constData();
 
   m_surface = ghostty_surface_new(m_app->handle(), &m_config);
   m_contextRealized = m_surface != nullptr;

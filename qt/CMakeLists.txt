@@ -15,6 +15,8 @@ qt_add_executable(qhostty
   src/GhosttyApp.h
   src/MainWindow.cpp
   src/MainWindow.h
+  src/TerminalTab.cpp
+  src/TerminalTab.h
   src/TerminalWidget.cpp
   src/TerminalWidget.h
 )
