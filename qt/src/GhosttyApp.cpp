@@ -5,6 +5,9 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusPendingCall>
 #include <QDebug>
 #include <QDesktopServices>
 #include <QInputMethod>
@@ -309,6 +312,21 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
         }
       }
       return true;
+    case GHOSTTY_ACTION_DESKTOP_NOTIFICATION: {
+      const auto& notification = action.action.desktop_notification;
+      QDBusMessage message = QDBusMessage::createMethodCall(
+          QStringLiteral("org.freedesktop.Notifications"),
+          QStringLiteral("/org/freedesktop/Notifications"),
+          QStringLiteral("org.freedesktop.Notifications"),
+          QStringLiteral("Notify"));
+      message << QStringLiteral("Qhostty") << uint(0)
+              << QStringLiteral("io.github.angristan.qhostty")
+              << QString::fromUtf8(notification.title)
+              << QString::fromUtf8(notification.body) << QStringList()
+              << QVariantMap() << -1;
+      QDBusConnection::sessionBus().asyncCall(message);
+      return true;
+    }
     case GHOSTTY_ACTION_OPEN_CONFIG: {
       const ghostty_string_s path = ghostty_config_open_path();
       if (path.ptr != nullptr) {

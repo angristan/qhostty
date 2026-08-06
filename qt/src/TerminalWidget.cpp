@@ -5,6 +5,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QFileDialog>
 #include <QFocusEvent>
 #include <QFrame>
 #include <QGuiApplication>
@@ -21,6 +22,7 @@
 #include <QOpenGLFunctions>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QSaveFile>
 #include <QShowEvent>
 #include <QSignalBlocker>
 #include <QUrl>
@@ -30,6 +32,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <string>
 
 TerminalWidget::TerminalWidget(GhosttyApp* app,
                                QWidget* parent,
@@ -289,6 +292,27 @@ bool TerminalWidget::handleAction(const ghostty_action_s& action) {
       const auto& url = action.action.open_url;
       return QDesktopServices::openUrl(
           QUrl(QString::fromUtf8(url.url, static_cast<qsizetype>(url.len))));
+    }
+    case GHOSTTY_ACTION_EXPORT_TERMINAL_IO: {
+      const auto& data = action.action.export_terminal_io;
+      if (data.contents == nullptr) {
+        return false;
+      }
+      const QString path = QFileDialog::getSaveFileName(
+          this, tr("Export terminal data"), QStringLiteral("terminal.txt"));
+      if (path.isEmpty()) {
+        return true;
+      }
+      QSaveFile file(path);
+      if (!file.open(QIODevice::WriteOnly)) {
+        QMessageBox::warning(this, tr("Export failed"), file.errorString());
+        return true;
+      }
+      file.write(data.contents, static_cast<qint64>(data.len));
+      if (!file.commit()) {
+        QMessageBox::warning(this, tr("Export failed"), file.errorString());
+      }
+      return true;
     }
     case GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD:
       QGuiApplication::clipboard()->setText(m_title);
@@ -597,13 +621,46 @@ bool TerminalWidget::sendKey(QKeyEvent* event, ghostty_input_action_e action) {
   }
 
   const QByteArray text = event->text().toUtf8();
+  int modifierBits = modifiers(event->modifiers());
+  switch (event->nativeScanCode()) {
+    case 0x3e:
+      modifierBits |= GHOSTTY_MODS_SHIFT_RIGHT;
+      break;
+    case 0x69:
+      modifierBits |= GHOSTTY_MODS_CTRL_RIGHT;
+      break;
+    case 0x6c:
+      modifierBits |= GHOSTTY_MODS_ALT_RIGHT;
+      break;
+    case 0x86:
+      modifierBits |= GHOSTTY_MODS_SUPER_RIGHT;
+      break;
+    default:
+      break;
+  }
+
+  uint32_t unshifted = 0;
+  const int qtKey = event->key();
+  if (qtKey >= Qt::Key_A && qtKey <= Qt::Key_Z) {
+    unshifted = static_cast<uint32_t>('a' + qtKey - Qt::Key_A);
+  } else if (qtKey >= 0x20 && qtKey < 0x01000000) {
+    unshifted = static_cast<uint32_t>(qtKey);
+  }
+
+  int consumedBits = GHOSTTY_MODS_NONE;
+  const std::u32string codepoints = event->text().toStdU32String();
+  if (event->modifiers().testFlag(Qt::ShiftModifier) && unshifted != 0 &&
+      !codepoints.empty() && codepoints.front() != unshifted) {
+    consumedBits |= GHOSTTY_MODS_SHIFT;
+  }
+
   ghostty_input_key_s key{};
   key.action = action;
-  key.mods = modifiers(event->modifiers());
-  key.consumed_mods = GHOSTTY_MODS_NONE;
+  key.mods = static_cast<ghostty_input_mods_e>(modifierBits);
+  key.consumed_mods = static_cast<ghostty_input_mods_e>(consumedBits);
   key.keycode = event->nativeScanCode();
   key.text = text.isEmpty() ? nullptr : text.constData();
-  key.unshifted_codepoint = 0;
+  key.unshifted_codepoint = unshifted;
   key.composing = m_composing;
   return ghostty_surface_key(m_surface, key);
 }

@@ -5,7 +5,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui Widgets OpenGL OpenGLWidgets)
 
 include(cmake/Ghostty.cmake)
 
@@ -29,6 +29,7 @@ target_compile_options(qhostty PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(qhostty PRIVATE
   Ghostty::Core
   Qt6::Core
+  Qt6::DBus
   Qt6::Gui
   Qt6::Widgets
   Qt6::OpenGL
