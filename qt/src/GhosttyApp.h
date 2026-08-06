@@ -19,6 +19,7 @@ class GhosttyApp final : public QObject {
 
   bool initialize();
   bool reloadConfig(bool soft = false);
+  bool reloadConfig(TerminalWidget* widget, bool soft = false);
 
   [[nodiscard]] ghostty_app_t handle() const { return m_app; }
   [[nodiscard]] ghostty_config_t config() const { return m_config; }
@@ -53,6 +54,7 @@ class GhosttyApp final : public QObject {
   bool handleAction(ghostty_target_s target, ghostty_action_s action);
   void scheduleTick();
   void tick();
+  void syncColorScheme();
 
   static TerminalWidget* widgetForTarget(ghostty_target_s target);
 

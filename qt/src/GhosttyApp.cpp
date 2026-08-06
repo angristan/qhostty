@@ -7,8 +7,35 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QDesktopServices>
+#include <QInputMethod>
 #include <QMetaObject>
+#include <QPalette>
+#include <QStyleHints>
 #include <QUrl>
+
+namespace {
+ghostty_config_t loadConfig() {
+  ghostty_config_t config = ghostty_config_new();
+  if (config == nullptr) {
+    return nullptr;
+  }
+
+  ghostty_config_load_default_files(config);
+  ghostty_config_load_cli_args(config);
+  ghostty_config_load_recursive_files(config);
+  ghostty_config_finalize(config);
+  return config;
+}
+
+void logDiagnostics(ghostty_config_t config) {
+  const uint32_t count = ghostty_config_diagnostics_count(config);
+  for (uint32_t index = 0; index < count; ++index) {
+    const ghostty_diagnostic_s diagnostic =
+        ghostty_config_get_diagnostic(config, index);
+    qWarning().noquote() << "Ghostty config:" << diagnostic.message;
+  }
+}
+}  // namespace
 
 GhosttyApp::GhosttyApp(QObject* parent) : QObject(parent) {}
 
@@ -32,23 +59,12 @@ GhosttyApp::~GhosttyApp() {
 }
 
 bool GhosttyApp::initialize() {
-  m_config = ghostty_config_new();
+  m_config = loadConfig();
   if (m_config == nullptr) {
     qCritical() << "Failed to create Ghostty configuration";
     return false;
   }
-
-  ghostty_config_load_default_files(m_config);
-  ghostty_config_load_cli_args(m_config);
-  ghostty_config_load_recursive_files(m_config);
-  ghostty_config_finalize(m_config);
-
-  const uint32_t diagnosticCount = ghostty_config_diagnostics_count(m_config);
-  for (uint32_t index = 0; index < diagnosticCount; ++index) {
-    const ghostty_diagnostic_s diagnostic =
-        ghostty_config_get_diagnostic(m_config, index);
-    qWarning().noquote() << "Ghostty config:" << diagnostic.message;
-  }
+  logDiagnostics(m_config);
 
   ghostty_runtime_config_s runtime{};
   runtime.userdata = this;
@@ -66,7 +82,24 @@ bool GhosttyApp::initialize() {
     return false;
   }
 
-  ghostty_app_set_focus(m_app, true);
+  connect(qGuiApp, &QGuiApplication::applicationStateChanged, this,
+          [this](Qt::ApplicationState state) {
+            if (m_app != nullptr) {
+              ghostty_app_set_focus(m_app, state == Qt::ApplicationActive);
+            }
+          });
+  connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this,
+          [this](Qt::ColorScheme) { syncColorScheme(); });
+  connect(QGuiApplication::inputMethod(), &QInputMethod::localeChanged, this,
+          [this]() {
+            if (m_app != nullptr) {
+              ghostty_app_keyboard_changed(m_app);
+            }
+          });
+
+  ghostty_app_set_focus(m_app,
+                        qGuiApp->applicationState() == Qt::ApplicationActive);
+  syncColorScheme();
   return true;
 }
 
@@ -80,19 +113,35 @@ bool GhosttyApp::reloadConfig(bool soft) {
     return true;
   }
 
-  ghostty_config_t replacement = ghostty_config_new();
+  ghostty_config_t replacement = loadConfig();
   if (replacement == nullptr) {
     return false;
   }
-
-  ghostty_config_load_default_files(replacement);
-  ghostty_config_load_cli_args(replacement);
-  ghostty_config_load_recursive_files(replacement);
-  ghostty_config_finalize(replacement);
+  logDiagnostics(replacement);
 
   ghostty_app_update_config(m_app, replacement);
-  ghostty_config_free(m_config);
-  m_config = replacement;
+  ghostty_config_free(replacement);
+  return true;
+}
+
+bool GhosttyApp::reloadConfig(TerminalWidget* widget, bool soft) {
+  if (widget == nullptr || widget->surface() == nullptr ||
+      m_config == nullptr) {
+    return false;
+  }
+
+  if (soft) {
+    ghostty_surface_update_config(widget->surface(), m_config);
+    return true;
+  }
+
+  ghostty_config_t replacement = loadConfig();
+  if (replacement == nullptr) {
+    return false;
+  }
+  logDiagnostics(replacement);
+  ghostty_surface_update_config(widget->surface(), replacement);
+  ghostty_config_free(replacement);
   return true;
 }
 
@@ -224,9 +273,22 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
       return true;
     }
     case GHOSTTY_ACTION_RELOAD_CONFIG:
-      return reloadConfig(action.action.reload_config.soft);
-    case GHOSTTY_ACTION_QUIT_TIMER:
+      return widget != nullptr
+                 ? reloadConfig(widget, action.action.reload_config.soft)
+                 : reloadConfig(action.action.reload_config.soft);
     case GHOSTTY_ACTION_CONFIG_CHANGE:
+      if (target.tag == GHOSTTY_TARGET_APP &&
+          action.action.config_change.config != nullptr) {
+        ghostty_config_t applied =
+            ghostty_config_clone(action.action.config_change.config);
+        if (applied == nullptr) {
+          return false;
+        }
+        ghostty_config_free(m_config);
+        m_config = applied;
+      }
+      return true;
+    case GHOSTTY_ACTION_QUIT_TIMER:
     case GHOSTTY_ACTION_CHECK_FOR_UPDATES:
       return true;
     default:
@@ -247,6 +309,22 @@ void GhosttyApp::tick() {
   if (m_app != nullptr) {
     ghostty_app_tick(m_app);
   }
+}
+
+void GhosttyApp::syncColorScheme() {
+  if (m_app == nullptr) {
+    return;
+  }
+
+  Qt::ColorScheme scheme = QGuiApplication::styleHints()->colorScheme();
+  if (scheme == Qt::ColorScheme::Unknown) {
+    const QColor window = QGuiApplication::palette().color(QPalette::Window);
+    scheme = window.lightness() < 128 ? Qt::ColorScheme::Dark
+                                      : Qt::ColorScheme::Light;
+  }
+  ghostty_app_set_color_scheme(m_app, scheme == Qt::ColorScheme::Dark
+                                          ? GHOSTTY_COLOR_SCHEME_DARK
+                                          : GHOSTTY_COLOR_SCHEME_LIGHT);
 }
 
 TerminalWidget* GhosttyApp::widgetForTarget(ghostty_target_s target) {
