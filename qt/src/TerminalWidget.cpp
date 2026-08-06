@@ -4,6 +4,7 @@
 #include "InputCoordinates.h"
 #include "InspectorWindow.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QClipboard>
 #include <QDesktopServices>
@@ -17,6 +18,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -142,7 +144,75 @@ TerminalWidget::TerminalWidget(GhosttyApp* app,
     runBindingAction(QStringLiteral("scroll_to_row:%1").arg(row));
   });
 
+  setupContextMenu();
   m_app->registerSurface(this);
+}
+
+void TerminalWidget::setupContextMenu() {
+  m_contextMenu = new QMenu(this);
+  m_contextMenu->setObjectName(QStringLiteral("qhostty-context-menu"));
+
+  const auto addBindingAction = [this](QMenu* menu, const QString& label,
+                                       const QString& binding) {
+    QAction* item = menu->addAction(label);
+    item->setData(binding);
+    connect(item, &QAction::triggered, this,
+            [this, item]() { runBindingAction(item->data().toString()); });
+    return item;
+  };
+
+  addBindingAction(m_contextMenu, tr("Copy"),
+                   QStringLiteral("copy_to_clipboard"));
+  addBindingAction(m_contextMenu, tr("Paste"),
+                   QStringLiteral("paste_from_clipboard"));
+  m_notifyNextCommandAction =
+      m_contextMenu->addAction(tr("Notify on Next Command Finish"));
+  m_notifyNextCommandAction->setObjectName(
+      QStringLiteral("qhostty-notify-next-command"));
+  m_notifyNextCommandAction->setCheckable(true);
+
+  m_contextMenu->addSeparator();
+  addBindingAction(m_contextMenu, tr("Clear"), QStringLiteral("clear_screen"));
+  addBindingAction(m_contextMenu, tr("Reset"), QStringLiteral("reset"));
+
+  m_contextMenu->addSeparator();
+  QMenu* splitMenu = m_contextMenu->addMenu(tr("Split"));
+  splitMenu->setObjectName(QStringLiteral("qhostty-context-split-menu"));
+  addBindingAction(splitMenu, tr("Change Title…"),
+                   QStringLiteral("prompt_surface_title"));
+  addBindingAction(splitMenu, tr("Split Up"), QStringLiteral("new_split:up"));
+  addBindingAction(splitMenu, tr("Split Down"),
+                   QStringLiteral("new_split:down"));
+  addBindingAction(splitMenu, tr("Split Left"),
+                   QStringLiteral("new_split:left"));
+  addBindingAction(splitMenu, tr("Split Right"),
+                   QStringLiteral("new_split:right"));
+  addBindingAction(splitMenu, tr("Close Split"),
+                   QStringLiteral("close_surface"));
+
+  QMenu* tabMenu = m_contextMenu->addMenu(tr("Tab"));
+  tabMenu->setObjectName(QStringLiteral("qhostty-context-tab-menu"));
+  addBindingAction(tabMenu, tr("Change Tab Title…"),
+                   QStringLiteral("prompt_tab_title"));
+  addBindingAction(tabMenu, tr("New Tab"), QStringLiteral("new_tab"));
+  addBindingAction(tabMenu, tr("Close Tab"), QStringLiteral("close_tab"));
+
+  QMenu* windowMenu = m_contextMenu->addMenu(tr("Window"));
+  windowMenu->setObjectName(QStringLiteral("qhostty-context-window-menu"));
+  addBindingAction(windowMenu, tr("New Window"), QStringLiteral("new_window"));
+  addBindingAction(windowMenu, tr("Close Window"),
+                   QStringLiteral("close_window"));
+
+  m_contextMenu->addSeparator();
+  QMenu* configMenu = m_contextMenu->addMenu(tr("Config"));
+  configMenu->setObjectName(QStringLiteral("qhostty-context-config-menu"));
+  addBindingAction(configMenu, tr("Open Configuration"),
+                   QStringLiteral("open_config"));
+  addBindingAction(configMenu, tr("Reload Configuration"),
+                   QStringLiteral("reload_config"));
+
+  connect(m_contextMenu, &QMenu::aboutToHide, this,
+          [this]() { setFocus(Qt::PopupFocusReason); });
 }
 
 TerminalWidget::~TerminalWidget() {
@@ -638,13 +708,20 @@ void TerminalWidget::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void TerminalWidget::mousePressEvent(QMouseEvent* event) {
+  setFocus(Qt::MouseFocusReason);
+  if (event->button() == Qt::RightButton) {
+    m_contextMenuPending = false;
+  }
   if (m_surface != nullptr) {
     sendMousePosition(event->position(), event->modifiers());
-    ghostty_surface_mouse_button(m_surface, GHOSTTY_MOUSE_PRESS,
-                                 mouseButton(event->button()),
-                                 modifiers(event->modifiers()));
+    const bool consumed = ghostty_surface_mouse_button(
+        m_surface, GHOSTTY_MOUSE_PRESS, mouseButton(event->button()),
+        modifiers(event->modifiers()));
+    if (event->button() == Qt::RightButton && !consumed) {
+      m_contextMenuPosition = event->globalPosition().toPoint();
+      m_contextMenuPending = true;
+    }
   }
-  setFocus(Qt::MouseFocusReason);
   event->accept();
 }
 
@@ -654,6 +731,10 @@ void TerminalWidget::mouseReleaseEvent(QMouseEvent* event) {
     ghostty_surface_mouse_button(m_surface, GHOSTTY_MOUSE_RELEASE,
                                  mouseButton(event->button()),
                                  modifiers(event->modifiers()));
+  }
+  if (event->button() == Qt::RightButton && m_contextMenuPending) {
+    m_contextMenuPending = false;
+    m_contextMenu->popup(m_contextMenuPosition);
   }
   event->accept();
 }
@@ -982,6 +1063,11 @@ void TerminalWidget::updateProgress(
 
 void TerminalWidget::commandFinished(
     const ghostty_action_command_finished_s& command) {
+  const bool notifyNext = m_notifyNextCommandAction->isChecked();
+  if (notifyNext) {
+    m_notifyNextCommandAction->setChecked(false);
+  }
+
   const char* modeValue = nullptr;
   if (!ghostty_config_get(m_appliedConfig, static_cast<void*>(&modeValue),
                           "notify-on-command-finish",
@@ -993,7 +1079,8 @@ void TerminalWidget::commandFinished(
   const QWidget* focus = QApplication::focusWidget();
   const bool surfaceFocused =
       focus == this || (focus != nullptr && isAncestorOf(focus));
-  if (mode == "never" || (mode == "unfocused" && surfaceFocused)) {
+  if (!notifyNext &&
+      (mode == "never" || (mode == "unfocused" && surfaceFocused))) {
     return;
   }
 

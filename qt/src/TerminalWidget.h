@@ -2,6 +2,7 @@
 
 #include <QByteArray>
 #include <QOpenGLWidget>
+#include <QPoint>
 #include <QPointer>
 #include <QStringList>
 
@@ -9,6 +10,7 @@
 
 #include <optional>
 
+class QAction;
 class QFocusEvent;
 class QFrame;
 class QHideEvent;
@@ -16,6 +18,7 @@ class QInputMethodEvent;
 class QKeyEvent;
 class QLabel;
 class QLineEdit;
+class QMenu;
 class QMouseEvent;
 class QProgressBar;
 class QResizeEvent;
@@ -104,6 +107,7 @@ class TerminalWidget final : public QOpenGLWidget {
                          Qt::KeyboardModifiers modifiers);
   void setMouseShape(ghostty_action_mouse_shape_e shape);
   void setMouseVisible(bool visible);
+  void setupContextMenu();
   void showSearch(const char* needle);
   void updateSearchCount();
   void updateProgress(const ghostty_action_progress_report_s& progress);
@@ -136,7 +140,11 @@ class TerminalWidget final : public QOpenGLWidget {
   QProgressBar* m_progressBar;
   QTimer* m_progressTimer;
   QScrollBar* m_scrollBar;
+  QMenu* m_contextMenu = nullptr;
+  QAction* m_notifyNextCommandAction = nullptr;
   QPointer<InspectorWindow> m_inspectorWindow;
+  QPoint m_contextMenuPosition;
+  bool m_contextMenuPending = false;
   QStringList m_keySequence;
   QStringList m_keyTables;
   uint64_t m_scrollMaximum = 0;

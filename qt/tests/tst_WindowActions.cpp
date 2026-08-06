@@ -8,8 +8,10 @@
 #include "TerminalTab.h"
 #include "TerminalWidget.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QLabel>
+#include <QMenu>
 #include <QProgressBar>
 #include <QScrollBar>
 #include <QStackedWidget>
@@ -38,6 +40,19 @@ bool captureGlobalBinding(void* userdata,
   result->action =
       QString::fromUtf8(action, static_cast<qsizetype>(actionLength));
   return true;
+}
+
+QStringList bindingActions(const QMenu* menu) {
+  QStringList result;
+  for (const QAction* action : menu->actions()) {
+    if (action->data().isValid()) {
+      result.append(action->data().toString());
+    }
+    if (action->menu() != nullptr) {
+      result.append(bindingActions(action->menu()));
+    }
+  }
+  return result;
 }
 }  // namespace
 
@@ -180,6 +195,33 @@ void WindowActionsTest::routesTerminalStateActions() {
   action.action.inspector = GHOSTTY_INSPECTOR_HIDE;
   QVERIFY(terminal->handleAction(action).value_or(false));
   QVERIFY(inspector->isHidden());
+
+  auto* contextMenu = terminal->findChild<QMenu*>(
+      QStringLiteral("qhostty-context-menu"), Qt::FindDirectChildrenOnly);
+  QVERIFY(contextMenu != nullptr);
+  QCOMPARE(
+      bindingActions(contextMenu),
+      QStringList(
+          {QStringLiteral("copy_to_clipboard"),
+           QStringLiteral("paste_from_clipboard"),
+           QStringLiteral("clear_screen"), QStringLiteral("reset"),
+           QStringLiteral("prompt_surface_title"),
+           QStringLiteral("new_split:up"), QStringLiteral("new_split:down"),
+           QStringLiteral("new_split:left"), QStringLiteral("new_split:right"),
+           QStringLiteral("close_surface"), QStringLiteral("prompt_tab_title"),
+           QStringLiteral("new_tab"), QStringLiteral("close_tab"),
+           QStringLiteral("new_window"), QStringLiteral("close_window"),
+           QStringLiteral("open_config"), QStringLiteral("reload_config")}));
+  auto* notifyNext = terminal->findChild<QAction*>(
+      QStringLiteral("qhostty-notify-next-command"));
+  QVERIFY(notifyNext != nullptr);
+  QVERIFY(notifyNext->isCheckable());
+  notifyNext->setChecked(true);
+  action = {};
+  action.tag = GHOSTTY_ACTION_COMMAND_FINISHED;
+  action.action.command_finished = {-1, 0};
+  QVERIFY(terminal->handleAction(action).value_or(false));
+  QVERIFY(!notifyNext->isChecked());
 
   action = {};
   action.tag = GHOSTTY_ACTION_GOTO_TAB;
