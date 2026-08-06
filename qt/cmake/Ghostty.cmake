@@ -24,6 +24,9 @@ add_custom_target(qhostty_libghostty
     -Demit-docs=false
     -Demit-macos-app=false
     -Demit-xcframework=false
+    # Qt loads system Fontconfig too. A second static copy exports the same
+    # symbols and can parse newer host configuration with an older parser.
+    -fsys=fontconfig
     "-Doptimize=${QHOSTTY_GHOSTTY_OPTIMIZE}"
     "-Dcpu=${QHOSTTY_GHOSTTY_CPU}"
     --prefix "${GHOSTTY_PREFIX}"

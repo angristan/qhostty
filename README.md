@@ -17,7 +17,7 @@ Qhostty currently provides:
 
 ## Build
 
-Requirements: Zig 0.16, CMake 3.25 or newer, Ninja, Qt 6.5 or newer with Core, DBus, Gui, Network, Widgets, OpenGL, and OpenGLWidgets, a C++20 compiler, and OpenGL 4.3.
+Requirements: Zig 0.16, CMake 3.25 or newer, Ninja, Qt 6.5 or newer with Core, DBus, Gui, Network, Widgets, OpenGL, and OpenGLWidgets, Fontconfig, a C++20 compiler, and OpenGL 4.3.
 
 LayerShellQt, KF6WindowSystem, and KF6GlobalAccel are optional at build time. They enable exact Plasma quick-terminal placement, KWin effects, and KDE global shortcuts.
 

@@ -48,6 +48,8 @@ jobs:
         run: |
           build/qt/qhostty +version
           ! ldd build/qt/qhostty | grep -E 'libgtk|libadwaita'
+          ldd build/qt/ghostty/lib/ghostty-internal.so | grep 'libfontconfig.so.1'
+          ! nm -D --defined-only build/qt/ghostty/lib/ghostty-internal.so | grep -q ' FcInit$'
 
       - name: Validate installation metadata
         run: |
