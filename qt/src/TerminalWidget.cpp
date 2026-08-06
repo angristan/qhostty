@@ -1,6 +1,7 @@
 #include "TerminalWidget.h"
 
 #include "GhosttyApp.h"
+#include "InspectorWindow.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -20,11 +21,15 @@
 #include <QMouseEvent>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
+#include <QPalette>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QSaveFile>
+#include <QScrollBar>
 #include <QShowEvent>
 #include <QSignalBlocker>
+#include <QTimer>
 #include <QUrl>
 #include <QWheelEvent>
 #include <QWindow>
@@ -32,6 +37,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <string>
 
 TerminalWidget::TerminalWidget(GhosttyApp* app,
@@ -45,6 +51,7 @@ TerminalWidget::TerminalWidget(GhosttyApp* app,
   setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
 
   m_config = baseConfig != nullptr ? *baseConfig : ghostty_surface_config_new();
+  m_appliedConfig = ghostty_config_clone(m_app->config());
   if (m_config.working_directory != nullptr) {
     m_workingDirectory = QString::fromUtf8(m_config.working_directory);
     m_workingDirectoryUtf8 = m_workingDirectory.toUtf8();
@@ -99,11 +106,51 @@ TerminalWidget::TerminalWidget(GhosttyApp* app,
   m_statusOverlay->setWordWrap(true);
   m_statusOverlay->hide();
 
+  m_readonlyBadge = new QLabel(tr("Read-only"), this);
+  m_readonlyBadge->setObjectName(QStringLiteral("qhostty-readonly"));
+  m_readonlyBadge->setFrameShape(QFrame::StyledPanel);
+  m_readonlyBadge->setContentsMargins(6, 3, 6, 3);
+  m_readonlyBadge->hide();
+
+  m_keyStateBadge = new QLabel(this);
+  m_keyStateBadge->setObjectName(QStringLiteral("qhostty-key-state"));
+  m_keyStateBadge->setFrameShape(QFrame::StyledPanel);
+  m_keyStateBadge->setContentsMargins(6, 3, 6, 3);
+  m_keyStateBadge->hide();
+
+  m_progressBar = new QProgressBar(this);
+  m_progressBar->setObjectName(QStringLiteral("qhostty-progress"));
+  m_progressBar->setTextVisible(false);
+  m_progressBar->setFixedHeight(4);
+  m_progressBar->hide();
+  m_progressTimer = new QTimer(this);
+  m_progressTimer->setSingleShot(true);
+  m_progressTimer->setInterval(15000);
+  connect(m_progressTimer, &QTimer::timeout, m_progressBar, &QWidget::hide);
+
+  m_scrollBar = new QScrollBar(Qt::Vertical, this);
+  m_scrollBar->setObjectName(QStringLiteral("qhostty-scrollbar"));
+  m_scrollBar->hide();
+  connect(m_scrollBar, &QScrollBar::valueChanged, this, [this](int value) {
+    if (m_scrollMaximum == 0 || m_scrollBar->maximum() == 0) {
+      return;
+    }
+    const uint64_t row = static_cast<uint64_t>(
+        std::llround(static_cast<double>(value) / m_scrollBar->maximum() *
+                     static_cast<double>(m_scrollMaximum)));
+    runBindingAction(QStringLiteral("scroll_to_row:%1").arg(row));
+  });
+
   m_app->registerSurface(this);
 }
 
 TerminalWidget::~TerminalWidget() {
+  emit surfaceClosing();
   destroySurface();
+  if (m_appliedConfig != nullptr) {
+    ghostty_config_free(m_appliedConfig);
+    m_appliedConfig = nullptr;
+  }
   m_app->unregisterSurface(this);
 }
 
@@ -349,6 +396,32 @@ bool TerminalWidget::handleAction(const ghostty_action_s& action) {
       m_statusOverlay->show();
       layoutOverlays();
       return true;
+    case GHOSTTY_ACTION_INSPECTOR: {
+      const auto mode = action.action.inspector;
+      const bool shouldShow =
+          mode == GHOSTTY_INSPECTOR_SHOW ||
+          (mode == GHOSTTY_INSPECTOR_TOGGLE &&
+           (m_inspectorWindow == nullptr || !m_inspectorWindow->isVisible()));
+      if (!shouldShow) {
+        if (m_inspectorWindow != nullptr) {
+          m_inspectorWindow->hide();
+        }
+        return true;
+      }
+      if (m_inspectorWindow == nullptr) {
+        m_inspectorWindow = new InspectorWindow(this, window());
+      }
+      m_inspectorWindow->show();
+      m_inspectorWindow->raise();
+      m_inspectorWindow->activateWindow();
+      return true;
+    }
+    case GHOSTTY_ACTION_RENDER_INSPECTOR:
+      if (m_inspectorWindow == nullptr) {
+        return false;
+      }
+      m_inspectorWindow->requestRender();
+      return true;
     case GHOSTTY_ACTION_START_SEARCH:
       showSearch(action.action.start_search.needle);
       return true;
@@ -367,12 +440,107 @@ bool TerminalWidget::handleAction(const ghostty_action_s& action) {
     case GHOSTTY_ACTION_SHOW_ON_SCREEN_KEYBOARD:
       QGuiApplication::inputMethod()->show();
       return true;
+    case GHOSTTY_ACTION_CONFIG_CHANGE: {
+      if (action.action.config_change.config == nullptr) {
+        return false;
+      }
+      ghostty_config_t applied =
+          ghostty_config_clone(action.action.config_change.config);
+      if (applied == nullptr) {
+        return false;
+      }
+      if (m_appliedConfig != nullptr) {
+        ghostty_config_free(m_appliedConfig);
+      }
+      m_appliedConfig = applied;
+
+      bool progressEnabled = true;
+      ghostty_config_get(m_appliedConfig, &progressEnabled, "progress-style",
+                         std::strlen("progress-style"));
+      if (!progressEnabled) {
+        m_progressTimer->stop();
+        m_progressBar->hide();
+      }
+      const char* scrollbarMode = nullptr;
+      if (ghostty_config_get(m_appliedConfig,
+                             static_cast<void*>(&scrollbarMode), "scrollbar",
+                             std::strlen("scrollbar")) &&
+          scrollbarMode != nullptr && QByteArray(scrollbarMode) == "never") {
+        m_scrollMaximum = 0;
+        m_scrollBar->hide();
+      }
+      layoutOverlays();
+      return true;
+    }
+    case GHOSTTY_ACTION_SCROLLBAR:
+      updateScrollbar(action.action.scrollbar);
+      return true;
+    case GHOSTTY_ACTION_PROGRESS_REPORT:
+      updateProgress(action.action.progress_report);
+      return true;
+    case GHOSTTY_ACTION_READONLY:
+      m_readonlyBadge->setVisible(action.action.readonly ==
+                                  GHOSTTY_READONLY_ON);
+      layoutOverlays();
+      return true;
+    case GHOSTTY_ACTION_KEY_SEQUENCE:
+      if (action.action.key_sequence.active) {
+        const ghostty_input_trigger_s trigger =
+            action.action.key_sequence.trigger;
+        QStringList parts;
+        if (trigger.mods & GHOSTTY_MODS_CTRL) {
+          parts.append(tr("Ctrl"));
+        }
+        if (trigger.mods & GHOSTTY_MODS_ALT) {
+          parts.append(tr("Alt"));
+        }
+        if (trigger.mods & GHOSTTY_MODS_SHIFT) {
+          parts.append(tr("Shift"));
+        }
+        if (trigger.mods & GHOSTTY_MODS_SUPER) {
+          parts.append(tr("Meta"));
+        }
+        if (trigger.tag == GHOSTTY_TRIGGER_UNICODE) {
+          const char32_t codepoint = static_cast<char32_t>(trigger.key.unicode);
+          parts.append(QString::fromUcs4(&codepoint, 1));
+        } else if (trigger.tag == GHOSTTY_TRIGGER_PHYSICAL) {
+          const auto key = trigger.key.physical;
+          if (key >= GHOSTTY_KEY_A && key <= GHOSTTY_KEY_Z) {
+            parts.append(
+                QChar(QLatin1Char('A').unicode() + key - GHOSTTY_KEY_A));
+          } else if (key >= GHOSTTY_KEY_DIGIT_0 && key <= GHOSTTY_KEY_DIGIT_9) {
+            parts.append(
+                QChar(QLatin1Char('0').unicode() + key - GHOSTTY_KEY_DIGIT_0));
+          } else {
+            parts.append(tr("Key %1").arg(static_cast<int>(key)));
+          }
+        }
+        m_keySequence.append(parts.join(QLatin1Char('+')));
+      } else {
+        m_keySequence.clear();
+      }
+      updateKeyState();
+      return true;
+    case GHOSTTY_ACTION_KEY_TABLE:
+      if (action.action.key_table.tag == GHOSTTY_KEY_TABLE_ACTIVATE) {
+        const auto& value = action.action.key_table.value.activate;
+        m_keyTables.append(
+            QString::fromUtf8(value.name, static_cast<qsizetype>(value.len)));
+      } else if (action.action.key_table.tag == GHOSTTY_KEY_TABLE_DEACTIVATE) {
+        if (!m_keyTables.isEmpty()) {
+          m_keyTables.removeLast();
+        }
+      } else if (action.action.key_table.tag ==
+                 GHOSTTY_KEY_TABLE_DEACTIVATE_ALL) {
+        m_keyTables.clear();
+      }
+      updateKeyState();
+      return true;
+    case GHOSTTY_ACTION_COMMAND_FINISHED:
+      commandFinished(action.action.command_finished);
+      return true;
     case GHOSTTY_ACTION_SELECTION_CHANGED:
     case GHOSTTY_ACTION_COLOR_CHANGE:
-    case GHOSTTY_ACTION_SCROLLBAR:
-    case GHOSTTY_ACTION_PROGRESS_REPORT:
-    case GHOSTTY_ACTION_COMMAND_FINISHED:
-    case GHOSTTY_ACTION_READONLY:
       return true;
     default:
       return false;
@@ -381,9 +549,7 @@ bool TerminalWidget::handleAction(const ghostty_action_s& action) {
 
 void TerminalWidget::initializeGL() {
   connect(context(), &QOpenGLContext::aboutToBeDestroyed, this,
-          &TerminalWidget::cleanupContext,
-          static_cast<Qt::ConnectionType>(Qt::DirectConnection |
-                                          Qt::UniqueConnection));
+          &TerminalWidget::cleanupContext, Qt::DirectConnection);
 
   if (m_surface == nullptr) {
     createSurface();
@@ -777,18 +943,189 @@ void TerminalWidget::updateSearchCount() {
   layoutOverlays();
 }
 
+void TerminalWidget::updateProgress(
+    const ghostty_action_progress_report_s& progress) {
+  bool enabled = true;
+  ghostty_config_get(m_appliedConfig, &enabled, "progress-style",
+                     std::strlen("progress-style"));
+  if (!enabled || progress.state == GHOSTTY_PROGRESS_STATE_REMOVE) {
+    m_progressTimer->stop();
+    m_progressBar->hide();
+    return;
+  }
+
+  QPalette palette = this->palette();
+  if (progress.state == GHOSTTY_PROGRESS_STATE_ERROR) {
+    palette.setColor(QPalette::Highlight, QColor(210, 55, 55));
+  } else if (progress.state == GHOSTTY_PROGRESS_STATE_PAUSE) {
+    palette.setColor(QPalette::Highlight, QColor(220, 145, 35));
+  }
+  m_progressBar->setPalette(palette);
+  if (progress.state == GHOSTTY_PROGRESS_STATE_INDETERMINATE ||
+      (progress.progress < 0 &&
+       progress.state != GHOSTTY_PROGRESS_STATE_PAUSE)) {
+    m_progressBar->setRange(0, 0);
+  } else {
+    m_progressBar->setRange(0, 100);
+    m_progressBar->setValue(progress.progress < 0
+                                ? 100
+                                : std::clamp<int>(progress.progress, 0, 100));
+  }
+  m_progressBar->show();
+  m_progressBar->raise();
+  m_progressTimer->start();
+  layoutOverlays();
+}
+
+void TerminalWidget::commandFinished(
+    const ghostty_action_command_finished_s& command) {
+  const char* modeValue = nullptr;
+  if (!ghostty_config_get(m_appliedConfig, static_cast<void*>(&modeValue),
+                          "notify-on-command-finish",
+                          std::strlen("notify-on-command-finish")) ||
+      modeValue == nullptr) {
+    return;
+  }
+  const QByteArray mode(modeValue);
+  const QWidget* focus = QApplication::focusWidget();
+  const bool surfaceFocused =
+      focus == this || (focus != nullptr && isAncestorOf(focus));
+  if (mode == "never" || (mode == "unfocused" && surfaceFocused)) {
+    return;
+  }
+
+  uint64_t threshold = 0;
+  ghostty_config_get(m_appliedConfig, &threshold,
+                     "notify-on-command-finish-after",
+                     std::strlen("notify-on-command-finish-after"));
+  if (command.duration <= threshold) {
+    return;
+  }
+
+  uint32_t configuredActions = 0;
+  ghostty_config_get(m_appliedConfig, &configuredActions,
+                     "notify-on-command-finish-action",
+                     std::strlen("notify-on-command-finish-action"));
+  if ((configuredActions & 1U) != 0) {
+    QApplication::beep();
+    QApplication::alert(window());
+    emit bellRang();
+  }
+  if ((configuredActions & 2U) == 0) {
+    return;
+  }
+
+  const QString title = command.exit_code < 0    ? tr("Command Finished")
+                        : command.exit_code == 0 ? tr("Command Succeeded")
+                                                 : tr("Command Failed");
+  const double seconds = static_cast<double>(command.duration) / 1.0e9;
+  QString elapsed;
+  if (seconds >= 3600) {
+    elapsed = tr("%1 h").arg(seconds / 3600, 0, 'f', 1);
+  } else if (seconds >= 60) {
+    elapsed = tr("%1 min").arg(seconds / 60, 0, 'f', 1);
+  } else if (seconds >= 1) {
+    elapsed = tr("%1 s").arg(seconds, 0, 'f', 1);
+  } else {
+    elapsed = tr("%1 ms").arg(command.duration / 1000000);
+  }
+  const QString body = command.exit_code < 0
+                           ? tr("Command took %1.").arg(elapsed)
+                           : tr("Command took %1 and exited with code %2.")
+                                 .arg(elapsed)
+                                 .arg(command.exit_code);
+  m_app->sendNotification(title, body);
+}
+
+void TerminalWidget::updateScrollbar(
+    const ghostty_action_scrollbar_s& scrollbar) {
+  const char* mode = nullptr;
+  if (ghostty_config_get(m_appliedConfig, static_cast<void*>(&mode),
+                         "scrollbar", std::strlen("scrollbar")) &&
+      mode != nullptr && QByteArray(mode) == "never") {
+    m_scrollMaximum = 0;
+    m_scrollBar->hide();
+    layoutOverlays();
+    return;
+  }
+
+  m_scrollMaximum =
+      scrollbar.total > scrollbar.len ? scrollbar.total - scrollbar.len : 0;
+  const uint64_t displayMaximum =
+      std::min<uint64_t>(m_scrollMaximum, std::numeric_limits<int>::max());
+  const int displayValue = m_scrollMaximum == 0
+                               ? 0
+                               : static_cast<int>(std::llround(
+                                     static_cast<double>(scrollbar.offset) /
+                                     static_cast<double>(m_scrollMaximum) *
+                                     static_cast<double>(displayMaximum)));
+  const int pageStep =
+      scrollbar.total == 0
+          ? 1
+          : std::max(1, static_cast<int>(
+                            std::llround(static_cast<double>(scrollbar.len) /
+                                         static_cast<double>(scrollbar.total) *
+                                         static_cast<double>(displayMaximum))));
+
+  const QSignalBlocker blocker(m_scrollBar);
+  m_scrollBar->setRange(0, static_cast<int>(displayMaximum));
+  m_scrollBar->setPageStep(pageStep);
+  m_scrollBar->setValue(displayValue);
+  m_scrollBar->setVisible(m_scrollMaximum > 0);
+  layoutOverlays();
+}
+
+void TerminalWidget::updateKeyState() {
+  QStringList state;
+  if (!m_keyTables.isEmpty()) {
+    state.append(tr("Table: %1").arg(m_keyTables.join(QStringLiteral(", "))));
+  }
+  if (!m_keySequence.isEmpty()) {
+    state.append(tr("Sequence: %1").arg(m_keySequence.join(QLatin1Char(' '))));
+  }
+  m_keyStateBadge->setText(state.join(QStringLiteral("  ")));
+  m_keyStateBadge->setVisible(!state.isEmpty());
+  layoutOverlays();
+}
+
 void TerminalWidget::layoutOverlays() {
+  const int scrollWidth = m_scrollBar != nullptr && m_scrollBar->isVisible()
+                              ? m_scrollBar->sizeHint().width()
+                              : 0;
+  if (m_progressBar != nullptr) {
+    m_progressBar->setGeometry(0, 0, std::max(0, width() - scrollWidth), 4);
+  }
+  if (m_scrollBar != nullptr) {
+    m_scrollBar->setGeometry(std::max(0, width() - scrollWidth), 0, scrollWidth,
+                             height());
+    m_scrollBar->raise();
+  }
   if (m_searchFrame != nullptr) {
-    const QSize hint = m_searchFrame->sizeHint().boundedTo(
-        QSize(std::max(0, width() - 16), std::max(0, height() - 16)));
-    m_searchFrame->setGeometry(std::max(8, width() - hint.width() - 8), 8,
-                               hint.width(), hint.height());
+    const QSize hint = m_searchFrame->sizeHint().boundedTo(QSize(
+        std::max(0, width() - scrollWidth - 16), std::max(0, height() - 16)));
+    m_searchFrame->setGeometry(
+        std::max(8, width() - scrollWidth - hint.width() - 8), 8, hint.width(),
+        hint.height());
+  }
+  if (m_readonlyBadge != nullptr) {
+    const QSize hint = m_readonlyBadge->sizeHint();
+    m_readonlyBadge->setGeometry(8, std::max(0, height() - hint.height() - 8),
+                                 hint.width(), hint.height());
+    m_readonlyBadge->raise();
+  }
+  if (m_keyStateBadge != nullptr) {
+    const QSize hint = m_keyStateBadge->sizeHint();
+    m_keyStateBadge->setGeometry(
+        std::max(8, width() - scrollWidth - hint.width() - 8),
+        std::max(0, height() - hint.height() - 8), hint.width(), hint.height());
+    m_keyStateBadge->raise();
   }
   if (m_statusOverlay != nullptr) {
-    const int overlayWidth = std::min(420, std::max(0, width() - 32));
+    const int overlayWidth =
+        std::min(420, std::max(0, width() - scrollWidth - 32));
     const QSize hint =
         m_statusOverlay->sizeHint().boundedTo(QSize(overlayWidth, height()));
-    m_statusOverlay->setGeometry((width() - overlayWidth) / 2,
+    m_statusOverlay->setGeometry((width() - scrollWidth - overlayWidth) / 2,
                                  (height() - hint.height()) / 2, overlayWidth,
                                  hint.height());
     m_statusOverlay->raise();

@@ -18,9 +18,11 @@
 #include <QMetaObject>
 #include <QPalette>
 #include <QStyleHints>
+#include <QTimer>
 #include <QUrl>
 
 #include <algorithm>
+#include <limits>
 
 namespace {
 ghostty_config_t loadConfig() {
@@ -66,7 +68,7 @@ ActivationOptions parseActivation(const QStringList& arguments,
   QStringList commandArguments;
 
   for (qsizetype index = 1; index < arguments.size(); ++index) {
-    const QString argument = arguments.at(index);
+    const QString& argument = arguments.at(index);
     if (argument == QStringLiteral("-e") || argument == QStringLiteral("--")) {
       commandArguments = arguments.mid(index + 1);
       break;
@@ -85,7 +87,13 @@ ActivationOptions parseActivation(const QStringList& arguments,
 
     if (const QString value = takeValue(QStringLiteral("--working-directory"));
         !value.isEmpty()) {
-      result.workingDirectory = QDir(senderDirectory).absoluteFilePath(value);
+      if (value == QStringLiteral("home")) {
+        result.workingDirectory = QDir::homePath();
+      } else if (value == QStringLiteral("inherit")) {
+        result.workingDirectory = QDir(senderDirectory).absolutePath();
+      } else {
+        result.workingDirectory = QDir(senderDirectory).absoluteFilePath(value);
+      }
     } else if (const QString value = takeValue(QStringLiteral("--title"));
                !value.isEmpty()) {
       result.title = value;
@@ -121,7 +129,22 @@ ActivationOptions parseActivation(const QStringList& arguments,
 }
 }  // namespace
 
-GhosttyApp::GhosttyApp(QObject* parent) : QObject(parent) {}
+GhosttyApp::GhosttyApp(QObject* parent)
+    : QObject(parent), m_quitTimer(new QTimer(this)) {
+  m_quitTimer->setSingleShot(true);
+  connect(m_quitTimer, &QTimer::timeout, this, [this]() {
+    if (m_quitDelayRemainingNs > m_quitTimerChunkNs) {
+      m_quitDelayRemainingNs -= m_quitTimerChunkNs;
+      scheduleQuitTimer();
+      return;
+    }
+    m_quitDelayRemainingNs = 0;
+    QCoreApplication::quit();
+  });
+  if (qApp != nullptr) {
+    qApp->setQuitOnLastWindowClosed(false);
+  }
+}
 
 GhosttyApp::~GhosttyApp() {
   while (!m_windows.isEmpty()) {
@@ -399,6 +422,7 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
           candidate->closeConfirmed();
         }
       }
+      QTimer::singleShot(0, qApp, &QCoreApplication::quit);
       return true;
     }
     case GHOSTTY_ACTION_NEW_TAB:
@@ -466,17 +490,8 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
       return true;
     case GHOSTTY_ACTION_DESKTOP_NOTIFICATION: {
       const auto& notification = action.action.desktop_notification;
-      QDBusMessage message = QDBusMessage::createMethodCall(
-          QStringLiteral("org.freedesktop.Notifications"),
-          QStringLiteral("/org/freedesktop/Notifications"),
-          QStringLiteral("org.freedesktop.Notifications"),
-          QStringLiteral("Notify"));
-      message << QStringLiteral("Qhostty") << uint(0)
-              << QStringLiteral("io.github.angristan.qhostty")
-              << QString::fromUtf8(notification.title)
-              << QString::fromUtf8(notification.body) << QStringList()
-              << QVariantMap() << -1;
-      QDBusConnection::sessionBus().asyncCall(message);
+      sendNotification(QString::fromUtf8(notification.title),
+                       QString::fromUtf8(notification.body));
       return true;
     }
     case GHOSTTY_ACTION_OPEN_CONFIG: {
@@ -493,31 +508,82 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
       return widget != nullptr
                  ? reloadConfig(widget, action.action.reload_config.soft)
                  : reloadConfig(action.action.reload_config.soft);
-    case GHOSTTY_ACTION_CONFIG_CHANGE:
-      if (target.tag == GHOSTTY_TARGET_APP &&
-          action.action.config_change.config != nullptr) {
-        ghostty_config_t applied =
-            ghostty_config_clone(action.action.config_change.config);
-        if (applied == nullptr) {
-          return false;
-        }
-        ghostty_config_free(m_config);
-        m_config = applied;
-        if (m_globalShortcuts != nullptr) {
-          m_globalShortcuts->refresh(m_config);
-        }
-        if (m_quickTerminal != nullptr && m_quickTerminal->isVisible()) {
-          showQuickTerminal(m_quickTerminal,
-                            QuickTerminalSettings::fromConfig(m_config));
-        }
+    case GHOSTTY_ACTION_CONFIG_CHANGE: {
+      if (target.tag != GHOSTTY_TARGET_APP ||
+          action.action.config_change.config == nullptr) {
+        return false;
+      }
+      ghostty_config_t applied =
+          ghostty_config_clone(action.action.config_change.config);
+      if (applied == nullptr) {
+        return false;
+      }
+      ghostty_config_free(m_config);
+      m_config = applied;
+      if (m_globalShortcuts != nullptr) {
+        m_globalShortcuts->refresh(m_config);
+      }
+      if (m_quickTerminal != nullptr && m_quickTerminal->isVisible()) {
+        showQuickTerminal(m_quickTerminal,
+                          QuickTerminalSettings::fromConfig(m_config));
       }
       return true;
+    }
     case GHOSTTY_ACTION_QUIT_TIMER:
-    case GHOSTTY_ACTION_CHECK_FOR_UPDATES:
+      if (action.action.quit_timer == GHOSTTY_QUIT_TIMER_STOP) {
+        m_quitTimer->stop();
+        m_quitDelayRemainingNs = 0;
+        return true;
+      }
+      m_quitDelayRemainingNs = 0;
+      ghostty_config_get(m_config, &m_quitDelayRemainingNs,
+                         "quit-after-last-window-closed-delay",
+                         std::strlen("quit-after-last-window-closed-delay"));
+      scheduleQuitTimer();
       return true;
+    case GHOSTTY_ACTION_CHECK_FOR_UPDATES:
+      qWarning() << "Built-in update checks are unavailable on Linux";
+      return false;
+    case GHOSTTY_ACTION_SECURE_INPUT:
+      qWarning() << "Secure keyboard entry is unavailable on Linux";
+      return false;
+    case GHOSTTY_ACTION_SHOW_GTK_INSPECTOR:
+      qWarning() << "The GTK inspector is unavailable in the Qt frontend";
+      return false;
+    case GHOSTTY_ACTION_UNDO:
+    case GHOSTTY_ACTION_REDO:
+      qWarning() << "Structural undo and redo are not supported on Linux";
+      return false;
     default:
+      qWarning() << "Unhandled Ghostty action tag" << action.tag;
       return false;
   }
+}
+
+void GhosttyApp::sendNotification(const QString& title, const QString& body) {
+  QDBusMessage message = QDBusMessage::createMethodCall(
+      QStringLiteral("org.freedesktop.Notifications"),
+      QStringLiteral("/org/freedesktop/Notifications"),
+      QStringLiteral("org.freedesktop.Notifications"),
+      QStringLiteral("Notify"));
+  message << QStringLiteral("Qhostty") << uint(0)
+          << QStringLiteral("io.github.angristan.qhostty") << title << body
+          << QStringList() << QVariantMap() << -1;
+  QDBusConnection::sessionBus().asyncCall(message);
+}
+
+void GhosttyApp::scheduleQuitTimer() {
+  constexpr uint64_t nanosecondsPerMillisecond = 1000000;
+  constexpr uint64_t maximumMilliseconds =
+      static_cast<uint64_t>(std::numeric_limits<int>::max());
+  const uint64_t roundedMilliseconds =
+      m_quitDelayRemainingNs / nanosecondsPerMillisecond +
+      (m_quitDelayRemainingNs % nanosecondsPerMillisecond == 0 ? 0 : 1);
+  const uint64_t chunkMilliseconds =
+      std::min(roundedMilliseconds, maximumMilliseconds);
+  m_quitTimerChunkNs = std::min(m_quitDelayRemainingNs,
+                                chunkMilliseconds * nanosecondsPerMillisecond);
+  m_quitTimer->start(static_cast<int>(chunkMilliseconds));
 }
 
 void GhosttyApp::scheduleTick() {

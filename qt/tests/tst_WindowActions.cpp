@@ -1,16 +1,22 @@
+#include "CommandPalette.h"
 #include "GhosttyApp.h"
+#include "InspectorWindow.h"
 #include "MainWindow.h"
 #include "QuickTerminal.h"
 #include "TerminalTab.h"
 #include "TerminalWidget.h"
 
 #include <QApplication>
+#include <QLabel>
+#include <QProgressBar>
+#include <QScrollBar>
 #include <QStackedWidget>
 #include <QTabBar>
 #include <QTemporaryFile>
 #include <QtTest>
 
 #include <cstdlib>
+#include <cstring>
 
 namespace {
 struct EnumeratedBinding {
@@ -37,6 +43,7 @@ class WindowActionsTest final : public QObject {
 
  private slots:
   void routesTabAndSplitActions();
+  void routesTerminalStateActions();
   void calculatesQuickTerminalGeometry();
   void enumeratesGlobalBindings();
 };
@@ -87,6 +94,80 @@ void WindowActionsTest::calculatesQuickTerminalGeometry() {
            QRect(340, 560, 400, 800));
 }
 
+void WindowActionsTest::routesTerminalStateActions() {
+  GhosttyApp ghostty;
+  QVERIFY(ghostty.initialize());
+  MainWindow window(&ghostty);
+  TerminalWidget* terminal = window.currentTab()->activeTerminal();
+  QVERIFY(terminal != nullptr);
+
+  ghostty_action_s action{};
+  ghostty_config_t previousConfig = terminal->config();
+  action.tag = GHOSTTY_ACTION_CONFIG_CHANGE;
+  action.action.config_change.config = ghostty.config();
+  QVERIFY(terminal->handleAction(action));
+  QVERIFY(terminal->config() != nullptr);
+  QVERIFY(terminal->config() != previousConfig);
+
+  action = {};
+  action.tag = GHOSTTY_ACTION_READONLY;
+  action.action.readonly = GHOSTTY_READONLY_ON;
+  QVERIFY(terminal->handleAction(action));
+  auto* readonly =
+      terminal->findChild<QLabel*>(QStringLiteral("qhostty-readonly"));
+  QVERIFY(readonly != nullptr);
+  QVERIFY(!readonly->isHidden());
+
+  action = {};
+  action.tag = GHOSTTY_ACTION_SCROLLBAR;
+  action.action.scrollbar = {100, 20, 10};
+  QVERIFY(terminal->handleAction(action));
+  auto* scrollbar =
+      terminal->findChild<QScrollBar*>(QStringLiteral("qhostty-scrollbar"));
+  QVERIFY(scrollbar != nullptr);
+  QVERIFY(!scrollbar->isHidden());
+  QCOMPARE(scrollbar->value(), 20);
+
+  action = {};
+  action.tag = GHOSTTY_ACTION_KEY_SEQUENCE;
+  action.action.key_sequence.active = true;
+  action.action.key_sequence.trigger.tag = GHOSTTY_TRIGGER_UNICODE;
+  action.action.key_sequence.trigger.key.unicode = 'g';
+  action.action.key_sequence.trigger.mods = GHOSTTY_MODS_CTRL;
+  QVERIFY(terminal->handleAction(action));
+  auto* keyState =
+      terminal->findChild<QLabel*>(QStringLiteral("qhostty-key-state"));
+  QVERIFY(keyState != nullptr);
+  QVERIFY(!keyState->isHidden());
+  QVERIFY(keyState->text().contains(QStringLiteral("Ctrl+g")));
+
+  action = {};
+  action.tag = GHOSTTY_ACTION_PROGRESS_REPORT;
+  action.action.progress_report.state = GHOSTTY_PROGRESS_STATE_SET;
+  action.action.progress_report.progress = 42;
+  QVERIFY(terminal->handleAction(action));
+  auto* progress =
+      terminal->findChild<QProgressBar*>(QStringLiteral("qhostty-progress"));
+  QVERIFY(progress != nullptr);
+  bool progressEnabled = true;
+  ghostty_config_get(ghostty.config(), &progressEnabled, "progress-style",
+                     std::strlen("progress-style"));
+  QCOMPARE(!progress->isHidden(), progressEnabled);
+  if (progressEnabled) {
+    QCOMPARE(progress->value(), 42);
+  }
+
+  action = {};
+  action.tag = GHOSTTY_ACTION_INSPECTOR;
+  action.action.inspector = GHOSTTY_INSPECTOR_SHOW;
+  QVERIFY(terminal->handleAction(action));
+  auto* inspector = window.findChild<InspectorWindow*>();
+  QVERIFY(inspector != nullptr);
+  action.action.inspector = GHOSTTY_INSPECTOR_HIDE;
+  QVERIFY(terminal->handleAction(action));
+  QVERIFY(inspector->isHidden());
+}
+
 void WindowActionsTest::routesTabAndSplitActions() {
   GhosttyApp ghostty;
   QVERIFY(ghostty.initialize());
@@ -103,7 +184,16 @@ void WindowActionsTest::routesTabAndSplitActions() {
   TerminalWidget* source = firstTab->activeTerminal();
   QVERIFY(source != nullptr);
 
+  CommandPalette palette(source->config(), source, {source});
+  QVERIFY(palette.entryCount() >= 1);
+
   ghostty_action_s action{};
+  action.tag = GHOSTTY_ACTION_FLOAT_WINDOW;
+  action.action.float_window = GHOSTTY_FLOAT_WINDOW_ON;
+  QVERIFY(window.handleAction(source, action));
+  QVERIFY(window.isHidden());
+
+  action = {};
   action.tag = GHOSTTY_ACTION_NEW_TAB;
   QVERIFY(window.handleAction(source, action));
   QCOMPARE(tabBar->count(), 2);

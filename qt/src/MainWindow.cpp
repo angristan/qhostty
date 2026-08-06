@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "CommandPalette.h"
 #include "GhosttyApp.h"
 #include "TerminalTab.h"
 #include "TerminalWidget.h"
@@ -180,10 +181,20 @@ bool MainWindow::handleAction(TerminalWidget* source,
     case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
       isFullScreen() ? showNormal() : showFullScreen();
       return true;
+    case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
+      toggleCommandPalette(source);
+      return true;
     case GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS: {
+      const bool wasVisible = isVisible();
+      const QRect previousGeometry = geometry();
+      const Qt::WindowStates previousState = windowState();
       const bool frameless = windowFlags().testFlag(Qt::FramelessWindowHint);
       setWindowFlag(Qt::FramelessWindowHint, !frameless);
-      show();
+      setGeometry(previousGeometry);
+      setWindowState(previousState);
+      if (wasVisible) {
+        show();
+      }
       return true;
     }
     case GHOSTTY_ACTION_TOGGLE_VISIBILITY:
@@ -201,8 +212,15 @@ bool MainWindow::handleAction(TerminalWidget* source,
       const bool enabled = mode == GHOSTTY_FLOAT_WINDOW_TOGGLE
                                ? !current
                                : mode == GHOSTTY_FLOAT_WINDOW_ON;
+      const bool wasVisible = isVisible();
+      const QRect previousGeometry = geometry();
+      const Qt::WindowStates previousState = windowState();
       setWindowFlag(Qt::WindowStaysOnTopHint, enabled);
-      show();
+      setGeometry(previousGeometry);
+      setWindowState(previousState);
+      if (wasVisible) {
+        show();
+      }
       return true;
     }
     case GHOSTTY_ACTION_TOGGLE_BACKGROUND_OPACITY:
@@ -384,6 +402,28 @@ void MainWindow::updateTabTitle(TerminalTab* tab, const QString& title) {
   if (index == m_tabBar->currentIndex()) {
     setWindowTitle(title);
   }
+}
+
+void MainWindow::toggleCommandPalette(TerminalWidget* source) {
+  if (m_commandPalette != nullptr) {
+    m_commandPalette->close();
+    return;
+  }
+  if (source == nullptr && currentTab() != nullptr) {
+    source = currentTab()->activeTerminal();
+  }
+  if (source == nullptr) {
+    return;
+  }
+
+  m_commandPalette = new CommandPalette(
+      source->config(), source,
+      findChildren<TerminalWidget*>({}, Qt::FindChildrenRecursively), this);
+  m_commandPalette->show();
+  const QPoint center = mapToGlobal(rect().center());
+  m_commandPalette->move(center - m_commandPalette->rect().center());
+  m_commandPalette->raise();
+  m_commandPalette->activateWindow();
 }
 
 bool MainWindow::selectTab(int value) {

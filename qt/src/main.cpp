@@ -3,6 +3,7 @@
 
 #include <QApplication>
 #include <QColorSpace>
+#include <QCryptographicHash>
 #include <QDebug>
 #include <QDir>
 #include <QIcon>
@@ -11,6 +12,10 @@
 #include <QSurfaceFormat>
 
 #include <cstdlib>
+
+#if defined(Q_OS_LINUX)
+#include <unistd.h>
+#endif
 
 #include <ghostty.h>
 
@@ -47,9 +52,20 @@ int main(int argc, char** argv) {
   if (runtimeDirectory.isEmpty()) {
     runtimeDirectory = QDir::tempPath();
   }
-  SingleInstance instance(
-      QDir(runtimeDirectory)
-          .filePath(QStringLiteral("io.github.angristan.qhostty.v1")));
+  QByteArray endpointIdentity("io.github.angristan.qhostty.v1");
+#if defined(Q_OS_LINUX)
+  endpointIdentity += ':' + QByteArray::number(geteuid());
+#endif
+  endpointIdentity += ':' + qgetenv("XDG_SESSION_ID");
+  endpointIdentity += ':' + qgetenv("WAYLAND_DISPLAY");
+  endpointIdentity += ':' + qgetenv("DISPLAY");
+  const QByteArray endpointHash =
+      QCryptographicHash::hash(endpointIdentity, QCryptographicHash::Sha256)
+          .toHex()
+          .left(24);
+  SingleInstance instance(QDir(runtimeDirectory)
+                              .filePath(QStringLiteral("qhostty-") +
+                                        QString::fromLatin1(endpointHash)));
   const SingleInstance::StartResult instanceResult =
       instance.start(application.arguments(), QDir::currentPath());
   if (instanceResult == SingleInstance::StartResult::Forwarded) {

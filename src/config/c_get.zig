@@ -52,6 +52,11 @@ fn getValue(ptr_raw: *anyopaque, value: anytype) bool {
             ptr.* = @floatCast(value);
         },
 
+        Config.Duration => {
+            const ptr: *u64 = @ptrCast(@alignCast(ptr_raw));
+            ptr.* = value.duration;
+        },
+
         else => |T| switch (@typeInfo(T)) {
             .optional => {
                 // If an optional has no value we return false.

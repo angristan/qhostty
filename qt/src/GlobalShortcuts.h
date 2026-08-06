@@ -17,7 +17,7 @@ class GlobalShortcuts final : public QObject {
 
   void refresh(ghostty_config_t config);
   [[nodiscard]] bool supported() const;
-  [[nodiscard]] int count() const { return m_actions.size(); }
+  [[nodiscard]] int count() const { return static_cast<int>(m_actions.size()); }
 
  private:
   static bool enumerate(void* userdata,

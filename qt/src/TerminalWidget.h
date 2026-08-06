@@ -2,6 +2,8 @@
 
 #include <QByteArray>
 #include <QOpenGLWidget>
+#include <QPointer>
+#include <QStringList>
 
 #include <ghostty.h>
 
@@ -13,10 +15,14 @@ class QKeyEvent;
 class QLabel;
 class QLineEdit;
 class QMouseEvent;
+class QProgressBar;
 class QResizeEvent;
+class QScrollBar;
 class QShowEvent;
+class QTimer;
 class QWheelEvent;
 class GhosttyApp;
+class InspectorWindow;
 
 class TerminalWidget final : public QOpenGLWidget {
   Q_OBJECT
@@ -28,6 +34,7 @@ class TerminalWidget final : public QOpenGLWidget {
   ~TerminalWidget() override;
 
   [[nodiscard]] ghostty_surface_t surface() const { return m_surface; }
+  [[nodiscard]] ghostty_config_t config() const { return m_appliedConfig; }
   [[nodiscard]] const QString& title() const { return m_title; }
   void setTitle(const QString& title);
   [[nodiscard]] const QString& workingDirectory() const {
@@ -55,6 +62,7 @@ class TerminalWidget final : public QOpenGLWidget {
   void tabTitleChanged(const QString& title);
   void closeRequested(TerminalWidget* widget);
   void bellRang();
+  void surfaceClosing();
 
  protected:
   void initializeGL() override;
@@ -95,6 +103,10 @@ class TerminalWidget final : public QOpenGLWidget {
   void setMouseVisible(bool visible);
   void showSearch(const char* needle);
   void updateSearchCount();
+  void updateProgress(const ghostty_action_progress_report_s& progress);
+  void commandFinished(const ghostty_action_command_finished_s& command);
+  void updateScrollbar(const ghostty_action_scrollbar_s& scrollbar);
+  void updateKeyState();
   void layoutOverlays();
 
   static ghostty_input_mods_e modifiers(Qt::KeyboardModifiers modifiers);
@@ -102,6 +114,7 @@ class TerminalWidget final : public QOpenGLWidget {
 
   GhosttyApp* m_app;
   ghostty_surface_t m_surface = nullptr;
+  ghostty_config_t m_appliedConfig = nullptr;
   ghostty_surface_config_s m_config{};
   bool m_contextRealized = false;
   bool m_composing = false;
@@ -115,6 +128,15 @@ class TerminalWidget final : public QOpenGLWidget {
   QLineEdit* m_searchEdit;
   QLabel* m_searchCount;
   QLabel* m_statusOverlay;
+  QLabel* m_readonlyBadge;
+  QLabel* m_keyStateBadge;
+  QProgressBar* m_progressBar;
+  QTimer* m_progressTimer;
+  QScrollBar* m_scrollBar;
+  QPointer<InspectorWindow> m_inspectorWindow;
+  QStringList m_keySequence;
+  QStringList m_keyTables;
+  uint64_t m_scrollMaximum = 0;
   qsizetype m_searchTotal = -1;
   qsizetype m_searchSelected = -1;
 };

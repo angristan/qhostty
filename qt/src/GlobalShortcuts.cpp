@@ -167,8 +167,18 @@ bool GlobalShortcuts::add(ghostty_input_trigger_s trigger,
 
 #ifdef QHOSTTY_HAS_GLOBAL_ACCEL
   auto* shortcut = new QAction(action, this);
+  QByteArray identity = action.toUtf8();
+  identity.append(':');
+  identity.append(QByteArray::number(static_cast<int>(trigger.tag)));
+  identity.append(':');
+  identity.append(QByteArray::number(static_cast<int>(trigger.mods)));
+  identity.append(':');
+  identity.append(
+      QByteArray::number(trigger.tag == GHOSTTY_TRIGGER_PHYSICAL
+                             ? static_cast<uint32_t>(trigger.key.physical)
+                             : trigger.key.unicode));
   const QByteArray digest =
-      QCryptographicHash::hash(action.toUtf8(), QCryptographicHash::Sha256);
+      QCryptographicHash::hash(identity, QCryptographicHash::Sha256);
   shortcut->setObjectName(QStringLiteral("ghostty-") +
                           QString::fromLatin1(digest.toHex().left(20)));
   shortcut->setText(action);

@@ -1040,10 +1040,12 @@ pub const Inspector = struct {
 
     const Backend = enum {
         metal,
+        opengl,
 
         pub fn deinit(self: Backend) void {
             switch (self) {
                 .metal => if (builtin.target.os.tag.isDarwin()) cimgui.ImGui_ImplMetal_Shutdown(),
+                .opengl => cimgui.ImGui_ImplOpenGL3_Shutdown(),
             }
         }
     };
@@ -1077,6 +1079,54 @@ pub const Inspector = struct {
     /// Queue a render for the next frame.
     pub fn queueRender(self: *Inspector) void {
         self.surface.queueInspectorRender();
+    }
+
+    /// Initialize the inspector for an OpenGL backend. The host must make the
+    /// inspector context current before calling this.
+    pub fn initOpenGL(self: *Inspector) bool {
+        cimgui.c.ImGui_SetCurrentContext(self.ig_ctx);
+
+        if (self.backend) |v| {
+            v.deinit();
+            self.backend = null;
+        }
+
+        if (!cimgui.ImGui_ImplOpenGL3_Init(null)) {
+            log.warn("failed to initialize OpenGL inspector backend", .{});
+            return false;
+        }
+        self.backend = .opengl;
+        log.debug("initialized OpenGL inspector backend", .{});
+        return true;
+    }
+
+    pub fn renderOpenGL(self: *Inspector) !void {
+        assert(self.backend == .opengl);
+        cimgui.c.ImGui_SetCurrentContext(self.ig_ctx);
+
+        for (0..2) |_| {
+            cimgui.ImGui_ImplOpenGL3_NewFrame();
+            try self.newFrame();
+            cimgui.c.ImGui_NewFrame();
+
+            render: {
+                const surface = &self.surface.core_surface;
+                const inspector = surface.inspector orelse break :render;
+                inspector.render(surface);
+            }
+
+            cimgui.c.ImGui_Render();
+        }
+
+        cimgui.ImGui_ImplOpenGL3_RenderDrawData(cimgui.c.ImGui_GetDrawData());
+    }
+
+    pub fn deinitOpenGL(self: *Inspector) void {
+        cimgui.c.ImGui_SetCurrentContext(self.ig_ctx);
+        if (self.backend == .opengl) {
+            self.backend.?.deinit();
+            self.backend = null;
+        }
     }
 
     /// Initialize the inspector for a metal backend.
@@ -2146,6 +2196,20 @@ pub const CAPI = struct {
 
     export fn ghostty_inspector_set_focus(ptr: *Inspector, focused: bool) void {
         ptr.focusCallback(focused);
+    }
+
+    export fn ghostty_inspector_opengl_realize(ptr: *Inspector) bool {
+        return ptr.initOpenGL();
+    }
+
+    export fn ghostty_inspector_opengl_render(ptr: *Inspector) void {
+        ptr.renderOpenGL() catch |err| {
+            log.err("error rendering OpenGL inspector err={}", .{err});
+        };
+    }
+
+    export fn ghostty_inspector_opengl_unrealize(ptr: *Inspector) void {
+        ptr.deinitOpenGL();
     }
 
     /// Sets the window background blur on macOS to the desired value.

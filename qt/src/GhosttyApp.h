@@ -12,6 +12,7 @@
 
 class GlobalShortcuts;
 class MainWindow;
+class QTimer;
 class TerminalWidget;
 
 class GhosttyApp final : public QObject {
@@ -34,6 +35,7 @@ class GhosttyApp final : public QObject {
                        const QString& workingDirectory);
   void toggleQuickTerminal();
   bool performBindingAction(const QString& action);
+  void sendNotification(const QString& title, const QString& body);
   void registerWindow(MainWindow* window);
   void unregisterWindow(MainWindow* window);
   void registerSurface(TerminalWidget* widget);
@@ -61,6 +63,7 @@ class GhosttyApp final : public QObject {
 
   bool handleAction(ghostty_target_s target, ghostty_action_s action);
   void scheduleTick();
+  void scheduleQuitTimer();
   void tick();
   void syncColorScheme();
 
@@ -69,6 +72,9 @@ class GhosttyApp final : public QObject {
   ghostty_config_t m_config = nullptr;
   ghostty_app_t m_app = nullptr;
   GlobalShortcuts* m_globalShortcuts = nullptr;
+  QTimer* m_quitTimer = nullptr;
+  uint64_t m_quitDelayRemainingNs = 0;
+  uint64_t m_quitTimerChunkNs = 0;
   QList<MainWindow*> m_windows;
   QPointer<MainWindow> m_quickTerminal;
   QSet<TerminalWidget*> m_surfaces;

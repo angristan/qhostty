@@ -1,9 +1,11 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QPointer>
 
 #include <ghostty.h>
 
+class CommandPalette;
 class GhosttyApp;
 class QCloseEvent;
 class QEvent;
@@ -52,10 +54,12 @@ class MainWindow final : public QMainWindow {
   void connectTab(TerminalTab* tab);
   void updateTabTitle(TerminalTab* tab, const QString& title);
   bool selectTab(int value);
+  void toggleCommandPalette(TerminalWidget* source);
 
   GhosttyApp* m_app;
   QTabBar* m_tabBar;
   QStackedWidget* m_stack;
   Role m_role;
+  QPointer<CommandPalette> m_commandPalette;
   bool m_quickTerminalAutohide = false;
 };
