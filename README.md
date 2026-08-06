@@ -2,6 +2,21 @@
 
 Qhostty is an experimental native Qt 6 frontend for the [Ghostty](https://ghostty.org/) terminal core. It targets KDE Plasma on Linux and does not use GTK or libadwaita at runtime.
 
+## GTK vs Qt on KDE Plasma
+
+The terminal configuration and content are the same. Only the Linux frontend changes. Select an image to view it at full size.
+
+<table>
+  <tr>
+    <th>Ghostty · GTK</th>
+    <th>Qhostty · Qt 6</th>
+  </tr>
+  <tr>
+    <td><a href="docs/screenshots/ghostty-gtk.png"><img src="docs/screenshots/ghostty-gtk.png" alt="Ghostty GTK frontend on KDE Plasma"></a></td>
+    <td><a href="docs/screenshots/qhostty-qt.png"><img src="docs/screenshots/qhostty-qt.png" alt="Qhostty Qt 6 frontend on KDE Plasma"></a></td>
+  </tr>
+</table>
+
 Qhostty currently provides:
 
 - Ghostty terminal, PTY, font, configuration, and OpenGL rendering
