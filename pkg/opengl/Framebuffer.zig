@@ -21,11 +21,16 @@ pub fn destroy(v: Framebuffer) void {
 }
 
 pub fn bind(v: Framebuffer, target: Target) !Binding {
-    // The default framebuffer is documented as being zero but
-    // on multiple OpenGL drivers its not zero, so we grab it
-    // at runtime.
+    // The default framebuffer is not necessarily zero. Read and draw targets
+    // can also differ, notably when rendering through QOpenGLWidget.
+    const binding: c.GLenum = switch (target) {
+        .framebuffer => c.GL_FRAMEBUFFER_BINDING,
+        .draw => c.GL_DRAW_FRAMEBUFFER_BINDING,
+        .read => c.GL_READ_FRAMEBUFFER_BINDING,
+        else => c.GL_FRAMEBUFFER_BINDING,
+    };
     var current: c.GLint = undefined;
-    glad.context.GetIntegerv.?(c.GL_FRAMEBUFFER_BINDING, &current);
+    glad.context.GetIntegerv.?(binding, &current);
     glad.context.BindFramebuffer.?(@intFromEnum(target), v.id);
     return .{ .target = target, .previous = @intCast(current) };
 }

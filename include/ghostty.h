@@ -66,6 +66,7 @@ typedef enum {
   GHOSTTY_PLATFORM_INVALID,
   GHOSTTY_PLATFORM_MACOS,
   GHOSTTY_PLATFORM_IOS,
+  GHOSTTY_PLATFORM_OPENGL,
 } ghostty_platform_e;
 
 typedef enum {
@@ -453,9 +454,20 @@ typedef struct {
   void* uiview;
 } ghostty_platform_ios_s;
 
+typedef void (*ghostty_opengl_proc_t)(void);
+typedef ghostty_opengl_proc_t (*ghostty_opengl_get_proc_address_cb)(const char*);
+typedef uint32_t (*ghostty_opengl_get_framebuffer_cb)(void*);
+
+typedef struct {
+  void* userdata;
+  ghostty_opengl_get_proc_address_cb get_proc_address;
+  ghostty_opengl_get_framebuffer_cb get_framebuffer;
+} ghostty_platform_opengl_s;
+
 typedef union {
   ghostty_platform_macos_s macos;
   ghostty_platform_ios_s ios;
+  ghostty_platform_opengl_s opengl;
 } ghostty_platform_u;
 
 typedef enum {
@@ -1120,6 +1132,8 @@ GHOSTTY_API bool ghostty_surface_needs_confirm_quit(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_process_exited(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_refresh(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_draw(ghostty_surface_t);
+GHOSTTY_API bool ghostty_surface_opengl_unrealize(ghostty_surface_t);
+GHOSTTY_API bool ghostty_surface_opengl_realize(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_content_scale(ghostty_surface_t, double, double);
 GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);

@@ -42,16 +42,38 @@ alloc: std.mem.Allocator,
 /// Alpha blending mode
 blending: configpkg.Config.AlphaBlending,
 
+/// Host framebuffer used by embedded OpenGL runtimes such as Qt.
+host_framebuffer: ?HostFramebuffer,
+
 /// The most recently presented target, in case we need to present it again.
 last_target: ?Target = null,
+
+const HostFramebuffer = struct {
+    userdata: ?*anyopaque,
+    get_proc_address: *const fn ([*:0]const u8) callconv(.c) ?*const fn () callconv(.c) void,
+    get: *const fn (?*anyopaque) callconv(.c) u32,
+};
 
 /// NOTE: This is an error{}!OpenGL instead of just OpenGL for parity with
 ///       Metal, since it needs to be fallible so does this, even though it
 ///       can't actually fail.
 pub fn init(alloc: Allocator, opts: rendererpkg.Options) error{}!OpenGL {
+    const host_framebuffer: ?HostFramebuffer = switch (apprt.runtime) {
+        apprt.embedded => switch (opts.rt_surface.platform) {
+            .opengl => |platform| .{
+                .userdata = platform.userdata,
+                .get_proc_address = platform.get_proc_address,
+                .get = platform.get_framebuffer,
+            },
+            else => null,
+        },
+        else => null,
+    };
+
     return .{
         .alloc = alloc,
         .blending = opts.config.blending,
+        .host_framebuffer = host_framebuffer,
     };
 }
 
@@ -160,8 +182,6 @@ fn prepareContext(getProcAddress: anytype) !void {
 
 /// This is called early right after surface creation.
 pub fn surfaceInit(surface: *apprt.Surface) !void {
-    _ = surface;
-
     switch (apprt.runtime) {
         else => @compileError("unsupported app runtime for OpenGL"),
 
@@ -169,10 +189,9 @@ pub fn surfaceInit(surface: *apprt.Surface) !void {
         apprt.gtk,
         => try prepareContext(null),
 
-        apprt.embedded => {
-            // TODO(mitchellh): this does nothing today to allow libghostty
-            // to compile for OpenGL targets but libghostty is strictly
-            // broken for rendering on this platforms.
+        apprt.embedded => switch (surface.platform) {
+            .opengl => |platform| try prepareContext(platform.get_proc_address),
+            else => return error.UnsupportedOpenGLPlatform,
         },
     }
 
@@ -234,19 +253,15 @@ pub fn threadExit(self: *const OpenGL) void {
     }
 }
 
-pub fn displayRealized(self: *const OpenGL) void {
-    _ = self;
-
-    switch (apprt.runtime) {
-        apprt.gtk => prepareContext(null) catch |err| {
-            log.warn(
-                "Error preparing GL context in displayRealized, err={}",
-                .{err},
-            );
-        },
-
-        else => @compileError("only GTK should be calling displayRealized"),
-    }
+pub fn displayRealized(self: *const OpenGL) !void {
+    return switch (apprt.runtime) {
+        apprt.gtk => try prepareContext(null),
+        apprt.embedded => if (self.host_framebuffer) |host|
+            try prepareContext(host.get_proc_address)
+        else
+            error.UnsupportedOpenGLPlatform,
+        else => @compileError("unsupported app runtime for OpenGL"),
+    };
 }
 
 /// Actions taken before doing anything in `drawFrame`.
@@ -311,6 +326,21 @@ pub fn present(self: *OpenGL, target: Target) !void {
     // Bind the target for reading.
     const fbobind = try target.framebuffer.bind(.read);
     defer fbobind.unbind();
+
+    // QOpenGLWidget renders into its own framebuffer instead of framebuffer
+    // zero. Bind the framebuffer supplied by the embedded host for drawing.
+    const previous_draw_framebuffer: ?gl.c.GLuint = if (self.host_framebuffer) |host| previous: {
+        var previous: gl.c.GLint = 0;
+        gl.glad.context.GetIntegerv.?(gl.c.GL_DRAW_FRAMEBUFFER_BINDING, &previous);
+        gl.glad.context.BindFramebuffer.?(
+            gl.c.GL_DRAW_FRAMEBUFFER,
+            host.get(host.userdata),
+        );
+        break :previous @intCast(previous);
+    } else null;
+    defer if (previous_draw_framebuffer) |previous| {
+        gl.glad.context.BindFramebuffer.?(gl.c.GL_DRAW_FRAMEBUFFER, previous);
+    };
 
     // Blit
     gl.glad.context.BlitFramebuffer.?(

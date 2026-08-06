@@ -927,7 +927,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         pub fn displayRealized(self: *Self) !void {
             // If our API has to do things on realize, let it.
             if (@hasDecl(GraphicsAPI, "displayRealized")) {
-                self.api.displayRealized();
+                try self.api.displayRealized();
             }
 
             // Lock the draw mutex so that we can

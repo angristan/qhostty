@@ -28,6 +28,10 @@ const log = std.log.scoped(.embedded_window);
 pub const resourcesDir = internal_os.resourcesDir;
 
 pub const App = struct {
+    /// OpenGL hosts such as Qt require all drawing on the application thread.
+    /// Metal hosts keep the existing renderer-thread behavior.
+    pub const must_draw_from_app_thread = builtin.target.os.tag == .linux;
+
     /// Because we only expect the embedding API to be used in embedded
     /// environments, the options are extern so that we can expose it
     /// directly to a C callconv and not pay for any translation costs.
@@ -346,6 +350,7 @@ pub const App = struct {
 pub const Platform = union(PlatformTag) {
     macos: MacOS,
     ios: IOS,
+    opengl: OpenGL,
 
     // If our build target for libghostty is not darwin then we do
     // not include macos support at all.
@@ -359,6 +364,18 @@ pub const Platform = union(PlatformTag) {
         uiview: objc.Object,
     } else void;
 
+    /// Callbacks supplied by an OpenGL host. The host must make its context
+    /// current before creating, drawing, or destroying the surface.
+    pub const OpenGL = struct {
+        const Proc = *const fn () callconv(.c) void;
+        pub const GetProcAddress = *const fn ([*:0]const u8) callconv(.c) ?Proc;
+        pub const GetFramebuffer = *const fn (?*anyopaque) callconv(.c) u32;
+
+        userdata: ?*anyopaque,
+        get_proc_address: GetProcAddress,
+        get_framebuffer: GetFramebuffer,
+    };
+
     // The C ABI compatible version of this union. The tag is expected
     // to be stored elsewhere.
     pub const C = extern union {
@@ -369,9 +386,15 @@ pub const Platform = union(PlatformTag) {
         ios: extern struct {
             uiview: ?*anyopaque,
         },
+
+        opengl: extern struct {
+            userdata: ?*anyopaque,
+            get_proc_address: ?OpenGL.GetProcAddress,
+            get_framebuffer: ?OpenGL.GetFramebuffer,
+        },
     };
 
-    /// Initialize a Platform a tag and configuration from the C ABI.
+    /// Initialize a Platform tag and configuration from the C ABI.
     pub fn init(tag_int: c_int, c_platform: C) !Platform {
         const tag = std.enums.fromInt(PlatformTag, tag_int) orelse return error.InvalidEnumTag;
         return switch (tag) {
@@ -388,6 +411,17 @@ pub const Platform = union(PlatformTag) {
                     break :ios error.UIViewMustBeSet);
                 break :ios .{ .ios = .{ .uiview = uiview } };
             } else error.UnsupportedPlatform,
+
+            .opengl => opengl: {
+                const config = c_platform.opengl;
+                break :opengl .{ .opengl = .{
+                    .userdata = config.userdata,
+                    .get_proc_address = config.get_proc_address orelse
+                        break :opengl error.OpenGLGetProcAddressMustBeSet,
+                    .get_framebuffer = config.get_framebuffer orelse
+                        break :opengl error.OpenGLGetFramebufferMustBeSet,
+                } };
+            },
         };
     }
 };
@@ -398,6 +432,7 @@ pub const PlatformTag = enum(c_int) {
 
     macos = 1,
     ios = 2,
+    opengl = 3,
 };
 
 pub const EnvVar = extern struct {
@@ -1683,6 +1718,33 @@ pub const CAPI = struct {
     /// call as soon as possible (NOW if possible).
     export fn ghostty_surface_draw(surface: *Surface) void {
         surface.draw();
+    }
+
+    /// Release GPU resources before an embedded OpenGL context is destroyed.
+    /// The host must make the context current before calling this function.
+    export fn ghostty_surface_opengl_unrealize(surface: *Surface) bool {
+        switch (surface.platform) {
+            .opengl => {
+                surface.core_surface.renderer.displayUnrealized();
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    /// Recreate GPU resources after an embedded OpenGL context is created.
+    /// The host must make the context current before calling this function.
+    export fn ghostty_surface_opengl_realize(surface: *Surface) bool {
+        switch (surface.platform) {
+            .opengl => {
+                surface.core_surface.renderer.displayRealized() catch |err| {
+                    log.err("error realizing OpenGL surface err={}", .{err});
+                    return false;
+                };
+                return true;
+            },
+            else => return false,
+        }
     }
 
     /// Update the size of a surface. This will trigger resize notifications
