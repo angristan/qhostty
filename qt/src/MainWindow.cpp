@@ -420,7 +420,7 @@ void MainWindow::toggleCommandPalette(TerminalWidget* source) {
 
   m_commandPalette = new CommandPalette(
       source->config(), source,
-      findChildren<TerminalWidget*>({}, Qt::FindChildrenRecursively), this);
+      findChildren<TerminalWidget*>(Qt::FindChildrenRecursively), this);
   m_commandPalette->show();
   const QPoint center = mapToGlobal(rect().center());
   m_commandPalette->move(center - m_commandPalette->rect().center());

@@ -22,7 +22,7 @@ TerminalTab::TerminalTab(GhosttyApp* app,
 }
 
 QList<TerminalWidget*> TerminalTab::terminals() const {
-  return findChildren<TerminalWidget*>({}, Qt::FindChildrenRecursively);
+  return findChildren<TerminalWidget*>(Qt::FindChildrenRecursively);
 }
 
 QString TerminalTab::title() const {
@@ -196,7 +196,7 @@ bool TerminalTab::resizeSplit(const ghostty_action_resize_split_s& resize) {
 
 void TerminalTab::equalizeSplits() {
   for (QSplitter* splitter :
-       findChildren<QSplitter*>({}, Qt::FindChildrenRecursively)) {
+       findChildren<QSplitter*>(Qt::FindChildrenRecursively)) {
     equalizeSplitter(splitter);
   }
 }
