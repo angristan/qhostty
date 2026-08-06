@@ -28,12 +28,19 @@ jobs:
         with:
           version: 0.16.0
 
+      - name: Install Qt
+        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4
+        with:
+          version: 6.8.3
+          archives: qtbase
+          cache: true
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             appstream cmake desktop-file-utils libfontconfig-dev libfreetype-dev \
-            libgl-dev libharfbuzz-dev libxkbcommon-dev ninja-build qt6-base-dev
+            libgl-dev libharfbuzz-dev libxkbcommon-dev ninja-build
 
       - name: Configure
         run: cmake -S qt -B build/qt -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
