@@ -1607,6 +1607,17 @@ pub const CAPI = struct {
         return surface.newSurfaceOptions(source);
     }
 
+    /// Free allocations owned by an inherited surface configuration.
+    export fn ghostty_surface_free_inherited_config(
+        surface: *Surface,
+        config: *Surface.Options,
+    ) void {
+        if (config.working_directory) |ptr| {
+            surface.app.core_app.alloc.free(std.mem.span(ptr));
+            config.working_directory = null;
+        }
+    }
+
     /// Update the configuration to the provided config for only this surface.
     export fn ghostty_surface_update_config(
         surface: *Surface,
