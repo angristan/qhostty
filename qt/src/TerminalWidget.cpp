@@ -96,15 +96,27 @@ TerminalWidget::~TerminalWidget() {
   m_app->unregisterSurface(this);
 }
 
+void TerminalWidget::setTitle(const QString& title) {
+  m_title = title;
+  emit titleChanged(m_title);
+}
+
 ghostty_surface_config_s TerminalWidget::inheritedConfig(
     ghostty_surface_context_e context) const {
+  if (m_surface != nullptr) {
+    return ghostty_surface_inherited_config(m_surface, context);
+  }
+
   ghostty_surface_config_s config = ghostty_surface_config_new();
-  config.font_size = m_config.font_size;
-  config.working_directory = m_workingDirectoryUtf8.isEmpty()
-                                 ? nullptr
-                                 : m_workingDirectoryUtf8.constData();
   config.context = context;
   return config;
+}
+
+void TerminalWidget::freeInheritedConfig(
+    ghostty_surface_config_s& config) const {
+  if (m_surface != nullptr) {
+    ghostty_surface_free_inherited_config(m_surface, &config);
+  }
 }
 
 bool TerminalWidget::readClipboard(ghostty_clipboard_e location, void* state) {
@@ -225,12 +237,11 @@ bool TerminalWidget::handleAction(const ghostty_action_s& action) {
       update();
       return true;
     case GHOSTTY_ACTION_SET_TITLE:
-      m_title = QString::fromUtf8(action.action.set_title.title);
-      emit titleChanged(m_title);
+      setTitle(QString::fromUtf8(action.action.set_title.title));
       return true;
     case GHOSTTY_ACTION_SET_TAB_TITLE:
-      m_title = QString::fromUtf8(action.action.set_tab_title.title);
-      emit titleChanged(m_title);
+      emit tabTitleChanged(
+          QString::fromUtf8(action.action.set_tab_title.title));
       return true;
     case GHOSTTY_ACTION_PWD:
       m_workingDirectory = QString::fromUtf8(action.action.pwd.pwd);
@@ -252,10 +263,14 @@ bool TerminalWidget::handleAction(const ghostty_action_s& action) {
       return true;
     }
     case GHOSTTY_ACTION_INITIAL_SIZE: {
-      if (window() != nullptr) {
-        const qreal scale = std::max<qreal>(1.0, devicePixelRatioF());
-        window()->resize(qCeil(action.action.initial_size.width / scale),
-                         qCeil(action.action.initial_size.height / scale));
+      if (window() != nullptr &&
+          m_config.context == GHOSTTY_SURFACE_CONTEXT_WINDOW &&
+          !window()->property("qhosttyInitialSizeApplied").toBool()) {
+        const QSize size(static_cast<int>(action.action.initial_size.width),
+                         static_cast<int>(action.action.initial_size.height));
+        window()->setProperty("qhosttyInitialSizeApplied", true);
+        window()->setProperty("qhosttyDefaultSize", size);
+        window()->resize(size);
       }
       return true;
     }
@@ -264,14 +279,6 @@ bool TerminalWidget::handleAction(const ghostty_action_s& action) {
       return true;
     case GHOSTTY_ACTION_MOUSE_VISIBILITY:
       setMouseVisible(action.action.mouse_visibility == GHOSTTY_MOUSE_VISIBLE);
-      return true;
-    case GHOSTTY_ACTION_PRESENT_TERMINAL:
-      if (window() != nullptr) {
-        window()->show();
-        window()->raise();
-        window()->activateWindow();
-      }
-      setFocus(Qt::OtherFocusReason);
       return true;
     case GHOSTTY_ACTION_RING_BELL:
       QApplication::beep();
@@ -605,7 +612,9 @@ void TerminalWidget::sendMousePosition(
     const QPointF& position,
     Qt::KeyboardModifiers keyboardModifiers) {
   if (m_surface != nullptr) {
-    ghostty_surface_mouse_pos(m_surface, position.x(), position.y(),
+    const qreal scale = std::max<qreal>(1.0, devicePixelRatioF());
+    ghostty_surface_mouse_pos(m_surface, position.x() * scale,
+                              position.y() * scale,
                               modifiers(keyboardModifiers));
   }
 }
@@ -690,7 +699,7 @@ void TerminalWidget::showSearch(const char* needle) {
 void TerminalWidget::updateSearchCount() {
   if (m_searchSelected >= 0 && m_searchTotal >= 0) {
     m_searchCount->setText(
-        tr("%1/%2").arg(m_searchSelected + 1).arg(m_searchTotal));
+        tr("%1/%2").arg(m_searchSelected).arg(m_searchTotal));
   } else if (m_searchTotal >= 0) {
     m_searchCount->setText(tr("–/%1").arg(m_searchTotal));
   } else {

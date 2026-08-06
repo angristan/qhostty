@@ -27,6 +27,30 @@ QList<TerminalWidget*> TerminalTab::terminals() const {
   return findChildren<TerminalWidget*>({}, Qt::FindChildrenRecursively);
 }
 
+QString TerminalTab::title() const {
+  if (!m_titleOverride.isEmpty()) {
+    return m_titleOverride;
+  }
+  if (m_active != nullptr && !m_active->title().isEmpty()) {
+    return m_active->title();
+  }
+  return tr("Terminal");
+}
+
+void TerminalTab::setTitleOverride(const QString& title) {
+  m_titleOverride = title;
+  emit titleChanged(this->title());
+}
+
+bool TerminalTab::present(TerminalWidget* terminal) {
+  if (terminal == nullptr || !terminals().contains(terminal)) {
+    return false;
+  }
+  setActive(terminal);
+  terminal->setFocus(Qt::OtherFocusReason);
+  return true;
+}
+
 TerminalWidget* TerminalTab::newSplit(
     TerminalWidget* source,
     ghostty_action_split_direction_e direction) {
@@ -40,6 +64,7 @@ TerminalWidget* TerminalTab::newSplit(
   ghostty_surface_config_s config =
       source->inheritedConfig(GHOSTTY_SURFACE_CONTEXT_SPLIT);
   auto* terminal = new TerminalWidget(m_app, nullptr, &config);
+  source->freeInheritedConfig(config);
   connectTerminal(terminal);
 
   const bool horizontal = direction == GHOSTTY_SPLIT_DIRECTION_LEFT ||
@@ -130,7 +155,7 @@ bool TerminalTab::focusSplit(ghostty_action_goto_split_e direction) {
   qint64 bestScore = std::numeric_limits<qint64>::max();
 
   for (TerminalWidget* candidate : all) {
-    if (candidate == m_active || !candidate->isVisible()) {
+    if (candidate == m_active) {
       continue;
     }
 
@@ -190,26 +215,38 @@ bool TerminalTab::resizeSplit(const ghostty_action_resize_split_s& resize) {
 
   QList<int> sizes = splitter->sizes();
   const int index = splitter->indexOf(child);
-  const int delta = static_cast<int>(resize.amount) *
-                    ((resize.direction == GHOSTTY_RESIZE_SPLIT_RIGHT ||
-                      resize.direction == GHOSTTY_RESIZE_SPLIT_DOWN)
-                         ? 1
-                         : -1);
   if (index < 0 || index >= sizes.size()) {
     return false;
   }
 
-  const int neighbor = delta > 0 ? index + 1 : index - 1;
-  if (neighbor < 0 || neighbor >= sizes.size()) {
+  const bool positive = resize.direction == GHOSTTY_RESIZE_SPLIT_RIGHT ||
+                        resize.direction == GHOSTTY_RESIZE_SPLIT_DOWN;
+  int neighbor = -1;
+  int activeDelta = 0;
+  if (positive && index + 1 < sizes.size()) {
+    neighbor = index + 1;
+    activeDelta = static_cast<int>(resize.amount);
+  } else if (positive && index > 0) {
+    neighbor = index - 1;
+    activeDelta = -static_cast<int>(resize.amount);
+  } else if (!positive && index > 0) {
+    neighbor = index - 1;
+    activeDelta = static_cast<int>(resize.amount);
+  } else if (!positive && index + 1 < sizes.size()) {
+    neighbor = index + 1;
+    activeDelta = -static_cast<int>(resize.amount);
+  } else {
     return false;
   }
 
-  const int amount = std::min(std::abs(delta), sizes.at(neighbor) - 1);
+  const int donor = activeDelta > 0 ? neighbor : index;
+  const int amount = std::min(std::abs(activeDelta), sizes.at(donor) - 1);
   if (amount <= 0) {
     return false;
   }
-  sizes[index] += amount;
-  sizes[neighbor] -= amount;
+  const int applied = activeDelta > 0 ? amount : -amount;
+  sizes[index] += applied;
+  sizes[neighbor] -= applied;
   splitter->setSizes(sizes);
   return true;
 }
@@ -227,9 +264,7 @@ void TerminalTab::toggleZoom() {
   }
 
   m_zoomed = !m_zoomed;
-  for (TerminalWidget* terminal : terminals()) {
-    terminal->setVisible(!m_zoomed || terminal == m_active);
-  }
+  updateZoomVisibility();
 }
 
 bool TerminalTab::canClose() const {
@@ -250,11 +285,13 @@ void TerminalTab::connectTerminal(TerminalWidget* terminal) {
   connect(terminal, &TerminalWidget::focused, this,
           [this, terminal]() { setActive(terminal); });
   connect(terminal, &TerminalWidget::titleChanged, this,
-          [this, terminal](const QString& title) {
-            if (terminal == m_active) {
-              emit titleChanged(title);
+          [this, terminal](const QString&) {
+            if (terminal == m_active && m_titleOverride.isEmpty()) {
+              emit titleChanged(title());
             }
           });
+  connect(terminal, &TerminalWidget::tabTitleChanged, this,
+          [this](const QString& title) { setTitleOverride(title); });
   connect(terminal, &TerminalWidget::closeRequested, this,
           [this](TerminalWidget* surface) { closeSurface(surface); });
 }
@@ -264,9 +301,8 @@ void TerminalTab::setActive(TerminalWidget* terminal) {
     return;
   }
   m_active = terminal;
-  if (m_active != nullptr && !m_active->title().isEmpty()) {
-    emit titleChanged(m_active->title());
-  }
+  updateZoomVisibility();
+  emit titleChanged(title());
 }
 
 void TerminalTab::collapseSplitter(QSplitter* splitter) {
@@ -289,5 +325,11 @@ void TerminalTab::collapseSplitter(QSplitter* splitter) {
 void TerminalTab::equalizeSplitter(QSplitter* splitter) {
   if (splitter != nullptr && splitter->count() > 0) {
     splitter->setSizes(QList<int>(splitter->count(), 1));
+  }
+}
+
+void TerminalTab::updateZoomVisibility() {
+  for (TerminalWidget* terminal : terminals()) {
+    terminal->setVisible(!m_zoomed || terminal == m_active);
   }
 }

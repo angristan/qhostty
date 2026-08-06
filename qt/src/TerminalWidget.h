@@ -29,11 +29,13 @@ class TerminalWidget final : public QOpenGLWidget {
 
   [[nodiscard]] ghostty_surface_t surface() const { return m_surface; }
   [[nodiscard]] const QString& title() const { return m_title; }
+  void setTitle(const QString& title);
   [[nodiscard]] const QString& workingDirectory() const {
     return m_workingDirectory;
   }
   [[nodiscard]] ghostty_surface_config_s inheritedConfig(
       ghostty_surface_context_e context) const;
+  void freeInheritedConfig(ghostty_surface_config_s& config) const;
 
   bool readClipboard(ghostty_clipboard_e location, void* state);
   void confirmReadClipboard(const char* contents,
@@ -49,6 +51,7 @@ class TerminalWidget final : public QOpenGLWidget {
  signals:
   void focused();
   void titleChanged(const QString& title);
+  void tabTitleChanged(const QString& title);
   void closeRequested(TerminalWidget* widget);
   void bellRang();
 

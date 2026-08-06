@@ -25,6 +25,8 @@ class MainWindow final : public QMainWindow {
   int adoptTab(TerminalTab* tab, const QString& title);
   bool handleAction(TerminalWidget* source, const ghostty_action_s& action);
   [[nodiscard]] TerminalTab* currentTab() const;
+  [[nodiscard]] bool canClose() const;
+  void closeConfirmed();
 
  protected:
   void closeEvent(QCloseEvent* event) override;

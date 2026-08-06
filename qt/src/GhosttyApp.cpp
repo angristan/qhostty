@@ -13,6 +13,8 @@
 #include <QStyleHints>
 #include <QUrl>
 
+#include <algorithm>
+
 namespace {
 ghostty_config_t loadConfig() {
   ghostty_config_t config = ghostty_config_new();
@@ -153,11 +155,13 @@ MainWindow* GhosttyApp::createWindow(
 }
 
 void GhosttyApp::registerWindow(MainWindow* window) {
-  m_windows.insert(window);
+  if (!m_windows.contains(window)) {
+    m_windows.append(window);
+  }
 }
 
 void GhosttyApp::unregisterWindow(MainWindow* window) {
-  m_windows.remove(window);
+  m_windows.removeAll(window);
 }
 
 void GhosttyApp::registerSurface(TerminalWidget* widget) {
@@ -231,14 +235,29 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
       widget != nullptr
           ? qobject_cast<MainWindow*>(widget->window())
           : qobject_cast<MainWindow*>(QApplication::activeWindow());
-  if (window != nullptr && window->handleAction(widget, action)) {
+  if (target.tag == GHOSTTY_TARGET_SURFACE && window != nullptr &&
+      window->handleAction(widget, action)) {
     return true;
   }
 
   switch (action.tag) {
     case GHOSTTY_ACTION_QUIT:
-    case GHOSTTY_ACTION_CLOSE_ALL_WINDOWS:
-      QCoreApplication::quit();
+    case GHOSTTY_ACTION_CLOSE_ALL_WINDOWS: {
+      const QList<MainWindow*> windows = m_windows;
+      for (MainWindow* candidate : windows) {
+        if (candidate != nullptr && !candidate->canClose()) {
+          return false;
+        }
+      }
+      for (MainWindow* candidate : windows) {
+        if (candidate != nullptr) {
+          candidate->closeConfirmed();
+        }
+      }
+      return true;
+    }
+    case GHOSTTY_ACTION_NEW_TAB:
+      createWindow();
       return true;
     case GHOSTTY_ACTION_NEW_WINDOW: {
       ghostty_surface_config_s config =
@@ -246,13 +265,16 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
               ? widget->inheritedConfig(GHOSTTY_SURFACE_CONTEXT_WINDOW)
               : ghostty_surface_config_new();
       createWindow(&config);
+      if (widget != nullptr) {
+        widget->freeInheritedConfig(config);
+      }
       return true;
     }
     case GHOSTTY_ACTION_GOTO_WINDOW: {
       if (m_windows.size() < 2 || window == nullptr) {
         return false;
       }
-      const QList<MainWindow*> windows = m_windows.values();
+      const QList<MainWindow*>& windows = m_windows;
       int index = windows.indexOf(window);
       const int delta =
           action.action.goto_window == GHOSTTY_GOTO_WINDOW_PREVIOUS ? -1 : 1;
@@ -262,6 +284,31 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
       windows.at(index)->activateWindow();
       return true;
     }
+    case GHOSTTY_ACTION_TOGGLE_VISIBILITY: {
+      const bool anyVisible = std::any_of(
+          m_windows.cbegin(), m_windows.cend(), [](MainWindow* candidate) {
+            return candidate != nullptr && candidate->isVisible();
+          });
+      for (MainWindow* candidate : m_windows) {
+        if (candidate == nullptr) {
+          continue;
+        }
+        if (anyVisible) {
+          candidate->hide();
+        } else {
+          candidate->show();
+          candidate->raise();
+        }
+      }
+      return true;
+    }
+    case GHOSTTY_ACTION_RENDER:
+      for (TerminalWidget* surface : m_surfaces) {
+        if (surface != nullptr) {
+          surface->handleAction(action);
+        }
+      }
+      return true;
     case GHOSTTY_ACTION_OPEN_CONFIG: {
       const ghostty_string_s path = ghostty_config_open_path();
       if (path.ptr != nullptr) {

@@ -19,6 +19,9 @@ class TerminalTab final : public QWidget {
 
   [[nodiscard]] TerminalWidget* activeTerminal() const { return m_active; }
   [[nodiscard]] QList<TerminalWidget*> terminals() const;
+  [[nodiscard]] QString title() const;
+  void setTitleOverride(const QString& title);
+  bool present(TerminalWidget* terminal);
 
   TerminalWidget* newSplit(TerminalWidget* source,
                            ghostty_action_split_direction_e direction);
@@ -38,9 +41,11 @@ class TerminalTab final : public QWidget {
   void setActive(TerminalWidget* terminal);
   void collapseSplitter(QSplitter* splitter);
   void equalizeSplitter(QSplitter* splitter);
+  void updateZoomVisibility();
 
   GhosttyApp* m_app;
   QBoxLayout* m_layout;
   TerminalWidget* m_active = nullptr;
+  QString m_titleOverride;
   bool m_zoomed = false;
 };

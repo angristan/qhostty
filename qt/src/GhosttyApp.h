@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QList>
 #include <QObject>
 #include <QSet>
 
@@ -60,7 +61,7 @@ class GhosttyApp final : public QObject {
 
   ghostty_config_t m_config = nullptr;
   ghostty_app_t m_app = nullptr;
-  QSet<MainWindow*> m_windows;
+  QList<MainWindow*> m_windows;
   QSet<TerminalWidget*> m_surfaces;
   std::atomic_bool m_tickQueued = false;
 };

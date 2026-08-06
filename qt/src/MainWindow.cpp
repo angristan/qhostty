@@ -45,9 +45,11 @@ MainWindow::MainWindow(GhosttyApp* app,
   connect(m_tabBar, &QTabBar::currentChanged, m_stack,
           &QStackedWidget::setCurrentIndex);
   connect(m_tabBar, &QTabBar::currentChanged, this, [this](int) {
-    if (TerminalTab* tab = currentTab();
-        tab != nullptr && tab->activeTerminal() != nullptr) {
-      tab->activeTerminal()->setFocus(Qt::OtherFocusReason);
+    if (TerminalTab* tab = currentTab(); tab != nullptr) {
+      setWindowTitle(tab->title());
+      if (tab->activeTerminal() != nullptr) {
+        tab->activeTerminal()->setFocus(Qt::OtherFocusReason);
+      }
     }
   });
   connect(m_tabBar, &QTabBar::tabCloseRequested, this, &MainWindow::closeTab);
@@ -103,6 +105,8 @@ int MainWindow::adoptTab(TerminalTab* tab, const QString& title) {
 bool MainWindow::handleAction(TerminalWidget* source,
                               const ghostty_action_s& action) {
   TerminalTab* tab = source != nullptr ? tabFor(source) : currentTab();
+  const int targetIndex =
+      tab != nullptr ? m_stack->indexOf(tab) : m_tabBar->currentIndex();
   switch (action.tag) {
     case GHOSTTY_ACTION_NEW_TAB: {
       ghostty_surface_config_s config =
@@ -110,23 +114,25 @@ bool MainWindow::handleAction(TerminalWidget* source,
               ? source->inheritedConfig(GHOSTTY_SURFACE_CONTEXT_TAB)
               : ghostty_surface_config_new();
       addTab(&config);
+      if (source != nullptr) {
+        source->freeInheritedConfig(config);
+      }
       return true;
     }
     case GHOSTTY_ACTION_CLOSE_TAB: {
-      const int current = m_tabBar->currentIndex();
       if (action.action.close_tab_mode == GHOSTTY_ACTION_CLOSE_TAB_MODE_OTHER) {
         for (int index = m_tabBar->count() - 1; index >= 0; --index) {
-          if (index != current) {
+          if (index != targetIndex) {
             closeTab(index);
           }
         }
       } else if (action.action.close_tab_mode ==
                  GHOSTTY_ACTION_CLOSE_TAB_MODE_RIGHT) {
-        for (int index = m_tabBar->count() - 1; index > current; --index) {
+        for (int index = m_tabBar->count() - 1; index > targetIndex; --index) {
           closeTab(index);
         }
       } else {
-        closeTab(current);
+        closeTab(targetIndex);
       }
       return true;
     }
@@ -150,7 +156,7 @@ bool MainWindow::handleAction(TerminalWidget* source,
       }
       return false;
     case GHOSTTY_ACTION_MOVE_TAB: {
-      const int from = m_tabBar->currentIndex();
+      const int from = targetIndex;
       const int count = m_tabBar->count();
       if (from < 0 || count < 2) {
         return false;
@@ -196,27 +202,54 @@ bool MainWindow::handleAction(TerminalWidget* source,
       return true;
     }
     case GHOSTTY_ACTION_TOGGLE_BACKGROUND_OPACITY:
+      return false;
+    case GHOSTTY_ACTION_TOGGLE_TAB_OVERVIEW: {
+      QMenu menu(this);
+      for (int index = 0; index < m_tabBar->count(); ++index) {
+        QAction* item = menu.addAction(m_tabBar->tabText(index));
+        item->setCheckable(true);
+        item->setChecked(index == m_tabBar->currentIndex());
+        connect(item, &QAction::triggered, this,
+                [this, index]() { m_tabBar->setCurrentIndex(index); });
+      }
+      menu.exec(m_tabBar->mapToGlobal(QPoint(0, m_tabBar->height())));
       return true;
-    case GHOSTTY_ACTION_TOGGLE_TAB_OVERVIEW:
-      m_tabBar->setVisible(!m_tabBar->isVisible());
-      return true;
-    case GHOSTTY_ACTION_RESET_WINDOW_SIZE:
-      resize(1000, 650);
-      return true;
-    case GHOSTTY_ACTION_PROMPT_TITLE: {
-      const int index = m_tabBar->currentIndex();
-      if (index < 0) {
+    }
+    case GHOSTTY_ACTION_PRESENT_TERMINAL:
+      if (tab == nullptr || !tab->present(source)) {
         return false;
       }
-      bool accepted = false;
-      const QString title = QInputDialog::getText(
-          this, tr("Change title"), tr("Title:"), QLineEdit::Normal,
-          m_tabBar->tabText(index), &accepted);
-      if (accepted && !title.isEmpty()) {
-        m_tabBar->setTabText(index, title);
-        setWindowTitle(title);
-      }
+      m_tabBar->setCurrentIndex(targetIndex);
+      show();
+      raise();
+      activateWindow();
       return true;
+    case GHOSTTY_ACTION_RESET_WINDOW_SIZE: {
+      const QSize size = property("qhosttyDefaultSize").toSize();
+      resize(size.isValid() ? size : QSize(1000, 650));
+      return true;
+    }
+    case GHOSTTY_ACTION_PROMPT_TITLE: {
+      if (targetIndex < 0 || tab == nullptr) {
+        return false;
+      }
+      const bool tabTitle =
+          action.action.prompt_title == GHOSTTY_PROMPT_TITLE_TAB;
+      bool accepted = false;
+      const QString current =
+          tabTitle ? tab->title()
+                   : (source != nullptr ? source->title() : QString());
+      const QString title =
+          QInputDialog::getText(this, tr("Change title"), tr("Title:"),
+                                QLineEdit::Normal, current, &accepted);
+      if (accepted) {
+        if (tabTitle) {
+          tab->setTitleOverride(title);
+        } else if (source != nullptr) {
+          source->setTitle(title);
+        }
+      }
+      return accepted;
     }
     case GHOSTTY_ACTION_CLOSE_WINDOW:
       close();
@@ -230,15 +263,27 @@ TerminalTab* MainWindow::currentTab() const {
   return qobject_cast<TerminalTab*>(m_stack->currentWidget());
 }
 
-void MainWindow::closeEvent(QCloseEvent* event) {
+bool MainWindow::canClose() const {
   for (int index = 0; index < m_stack->count(); ++index) {
     auto* tab = qobject_cast<TerminalTab*>(m_stack->widget(index));
     if (tab != nullptr && !tab->canClose()) {
-      event->ignore();
-      return;
+      return false;
     }
   }
-  event->accept();
+  return true;
+}
+
+void MainWindow::closeConfirmed() {
+  setProperty("qhosttyCloseConfirmed", true);
+  close();
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+  if (property("qhosttyCloseConfirmed").toBool() || canClose()) {
+    event->accept();
+  } else {
+    event->ignore();
+  }
 }
 
 TerminalTab* MainWindow::tabFor(TerminalWidget* terminal) const {
