@@ -270,11 +270,27 @@ pub fn alloc() std.mem.Allocator {
 
 /// Helper to return either the state's environment, or one from testing.
 ///
+/// On POSIX with libc this reads the process environment directly rather than
+/// the copy saved at init. Our `Environ` carries an explicit length, but any
+/// `setenv`/`unsetenv` call changes how many entries the POSIX environment
+/// block actually has, and those calls are not ours to control: an embedding
+/// application (or any library it loads) can make them at any point after
+/// `ghostty_init`. Qt's Wayland platform plugin, for example, unsets
+/// `XDG_ACTIVATION_TOKEN` the first time it activates a window, which leaves
+/// the saved length one entry too long and makes us read the block's null
+/// terminator as if it were a variable.
+///
 /// Asserts that the global state is initialized when not running as a test.
 pub fn environ() std.process.Environ {
     if (builtin.is_test) return std.testing.environ;
 
-    return state.?.environ;
+    return switch (builtin.os.tag) {
+        .windows => state.?.environ,
+        else => if (comptime builtin.link_libc)
+            processEnviron()
+        else
+            state.?.environ,
+    };
 }
 
 /// Helper to create an environment map off of the state's environment, or one
@@ -284,7 +300,18 @@ pub fn environ() std.process.Environ {
 pub fn environMap() !std.process.Environ.Map {
     if (builtin.is_test) return std.testing.environ.createMap(std.testing.allocator);
 
-    return state.?.environ.createMap(state.?.alloc);
+    return environ().createMap(state.?.alloc);
+}
+
+/// Reads the current POSIX environment block off of the process. Asserts libc,
+/// since `std.c.environ` is how we get at it.
+fn processEnviron() std.process.Environ {
+    assert(builtin.link_libc);
+    return .{ .block = .{ .slice = std.c.environ[0..env_len: {
+        var len: usize = 0;
+        while (std.c.environ[len]) |_| : (len += 1) {}
+        break :env_len len;
+    } :null] } };
 }
 
 /// Re-synchronizes the global Environ (both the higher-level and I/O versions)
@@ -310,11 +337,7 @@ pub fn syncEnviron() void {
         else => {
             assert(builtin.link_libc);
             assert(!builtin.is_test);
-            const new_environ: std.process.Environ = .{ .block = .{ .slice = std.c.environ[0..env_len: {
-                var len: usize = 0;
-                while (std.c.environ[len]) |_| : (len += 1) {}
-                break :env_len len;
-            } :null] } };
+            const new_environ = processEnviron();
             state.?.environ = new_environ;
             state.?.io_impl.environ = .{ .process_environ = new_environ };
         },
