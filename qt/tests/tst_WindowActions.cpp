@@ -1,5 +1,7 @@
 #include "CommandPalette.h"
 #include "GhosttyApp.h"
+#include "GlobalShortcuts.h"
+#include "InputCoordinates.h"
 #include "InspectorWindow.h"
 #include "MainWindow.h"
 #include "QuickTerminal.h"
@@ -46,7 +48,15 @@ class WindowActionsTest final : public QObject {
   void routesTerminalStateActions();
   void calculatesQuickTerminalGeometry();
   void enumeratesGlobalBindings();
+  void mapsMouseCoordinates();
 };
+
+void WindowActionsTest::mapsMouseCoordinates() {
+  const QPointF logicalPosition(37.25, 81.5);
+  QCOMPARE(ghosttySurfaceMousePosition(logicalPosition, 1.0), logicalPosition);
+  QCOMPARE(ghosttySurfaceMousePosition(logicalPosition, 1.5), logicalPosition);
+  QCOMPARE(ghosttySurfaceMousePosition(logicalPosition, 2.0), logicalPosition);
+}
 
 void WindowActionsTest::enumeratesGlobalBindings() {
   QTemporaryFile file;
@@ -70,6 +80,9 @@ void WindowActionsTest::enumeratesGlobalBindings() {
   QCOMPARE(binding.trigger.key.unicode, static_cast<uint32_t>('g'));
   QVERIFY(binding.trigger.mods & GHOSTTY_MODS_CTRL);
   QVERIFY(binding.trigger.mods & GHOSTTY_MODS_SHIFT);
+  QCOMPARE(GlobalShortcuts::sequenceForTrigger(binding.trigger),
+           QKeySequence(QKeyCombination(Qt::ControlModifier | Qt::ShiftModifier,
+                                        Qt::Key_G)));
   ghostty_config_free(config);
 }
 

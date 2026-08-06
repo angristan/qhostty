@@ -1,6 +1,7 @@
 #include "TerminalWidget.h"
 
 #include "GhosttyApp.h"
+#include "InputCoordinates.h"
 #include "InspectorWindow.h"
 
 #include <QApplication>
@@ -847,9 +848,10 @@ void TerminalWidget::sendMousePosition(
     const QPointF& position,
     Qt::KeyboardModifiers keyboardModifiers) {
   if (m_surface != nullptr) {
-    const qreal scale = std::max<qreal>(1.0, devicePixelRatioF());
-    ghostty_surface_mouse_pos(m_surface, position.x() * scale,
-                              position.y() * scale,
+    const QPointF surfacePosition =
+        ghosttySurfaceMousePosition(position, devicePixelRatioF());
+    ghostty_surface_mouse_pos(m_surface, surfacePosition.x(),
+                              surfacePosition.y(),
                               modifiers(keyboardModifiers));
   }
 }

@@ -92,8 +92,10 @@ Qt::Key physicalKey(ghostty_input_key_e key) {
       return Qt::Key_unknown;
   }
 }
+}  // namespace
 
-QKeySequence sequenceForTrigger(ghostty_input_trigger_s trigger) {
+QKeySequence GlobalShortcuts::sequenceForTrigger(
+    ghostty_input_trigger_s trigger) {
   Qt::KeyboardModifiers modifiers;
   if (trigger.mods & GHOSTTY_MODS_SHIFT) {
     modifiers |= Qt::ShiftModifier;
@@ -113,12 +115,15 @@ QKeySequence sequenceForTrigger(ghostty_input_trigger_s trigger) {
     key = physicalKey(trigger.key.physical);
   } else if (trigger.tag == GHOSTTY_TRIGGER_UNICODE &&
              trigger.key.unicode >= 0x20 && trigger.key.unicode <= 0x00ffffff) {
-    key = static_cast<Qt::Key>(trigger.key.unicode);
+    uint32_t codepoint = trigger.key.unicode;
+    if (codepoint >= 'a' && codepoint <= 'z') {
+      codepoint = codepoint - 'a' + 'A';
+    }
+    key = static_cast<Qt::Key>(codepoint);
   }
   return key == Qt::Key_unknown ? QKeySequence()
                                 : QKeySequence(QKeyCombination(modifiers, key));
 }
-}  // namespace
 
 GlobalShortcuts::GlobalShortcuts(GhosttyApp* app, QObject* parent)
     : QObject(parent), m_app(app) {}
@@ -184,7 +189,14 @@ bool GlobalShortcuts::add(ghostty_input_trigger_s trigger,
   shortcut->setText(action);
   connect(shortcut, &QAction::triggered, this,
           [this, action]() { m_app->performBindingAction(action); });
-  if (!KGlobalAccel::setGlobalShortcut(shortcut, sequence)) {
+  KGlobalAccel* globalAccel = KGlobalAccel::self();
+  const QList<QKeySequence> sequences{sequence};
+  const bool defaultSet = globalAccel->setDefaultShortcut(
+      shortcut, sequences, KGlobalAccel::NoAutoloading);
+  const bool activeSet = globalAccel->setShortcut(shortcut, sequences,
+                                                  KGlobalAccel::NoAutoloading);
+  if (!defaultSet || !activeSet) {
+    globalAccel->removeAllShortcuts(shortcut);
     shortcut->deleteLater();
     return true;
   }

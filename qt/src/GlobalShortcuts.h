@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QKeySequence>
 #include <QList>
 #include <QObject>
 
@@ -18,6 +19,8 @@ class GlobalShortcuts final : public QObject {
   void refresh(ghostty_config_t config);
   [[nodiscard]] bool supported() const;
   [[nodiscard]] int count() const { return static_cast<int>(m_actions.size()); }
+  [[nodiscard]] static QKeySequence sequenceForTrigger(
+      ghostty_input_trigger_s trigger);
 
  private:
   static bool enumerate(void* userdata,

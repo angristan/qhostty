@@ -19,6 +19,8 @@ qt_add_library(qhostty_frontend STATIC
   src/GhosttyApp.h
   src/InspectorWindow.cpp
   src/InspectorWindow.h
+  src/InputCoordinates.cpp
+  src/InputCoordinates.h
   src/GlobalShortcuts.cpp
   src/GlobalShortcuts.h
   src/MainWindow.cpp
