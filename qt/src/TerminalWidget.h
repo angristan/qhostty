@@ -11,6 +11,7 @@
 #include <optional>
 
 class QAction;
+class QEvent;
 class QFocusEvent;
 class QFrame;
 class QHideEvent;
@@ -85,8 +86,10 @@ class TerminalWidget final : public QOpenGLWidget {
   void mousePressEvent(QMouseEvent* event) override;
   void mouseReleaseEvent(QMouseEvent* event) override;
   void wheelEvent(QWheelEvent* event) override;
+  void leaveEvent(QEvent* event) override;
   void focusInEvent(QFocusEvent* event) override;
   void focusOutEvent(QFocusEvent* event) override;
+  bool focusNextPrevChild(bool next) override;
   void showEvent(QShowEvent* event) override;
   void hideEvent(QHideEvent* event) override;
   bool event(QEvent* event) override;
@@ -107,6 +110,8 @@ class TerminalWidget final : public QOpenGLWidget {
                          Qt::KeyboardModifiers modifiers);
   void setMouseShape(ghostty_action_mouse_shape_e shape);
   void setMouseVisible(bool visible);
+  void applyMouseCursor();
+  void scheduleSurfaceFocus(bool focused);
   void setupContextMenu();
   void showSearch(const char* needle);
   void updateSearchCount();
@@ -125,6 +130,12 @@ class TerminalWidget final : public QOpenGLWidget {
   ghostty_surface_config_s m_config{};
   bool m_contextRealized = false;
   bool m_composing = false;
+  bool m_suppressLeftMouseRelease = false;
+  bool m_focusFollowsMouse = false;
+  bool m_focusUpdateScheduled = false;
+  bool m_mouseVisible = true;
+  ghostty_action_mouse_shape_e m_mouseShape = GHOSTTY_MOUSE_SHAPE_DEFAULT;
+  std::optional<bool> m_pendingSurfaceFocus;
   QString m_title;
   QString m_workingDirectory;
   QByteArray m_workingDirectoryUtf8;

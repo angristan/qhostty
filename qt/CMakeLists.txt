@@ -21,6 +21,8 @@ qt_add_library(qhostty_frontend STATIC
   src/InspectorWindow.h
   src/InputCoordinates.cpp
   src/InputCoordinates.h
+  src/KeyEventTranslation.cpp
+  src/KeyEventTranslation.h
   src/GlobalShortcuts.cpp
   src/GlobalShortcuts.h
   src/MainWindow.cpp
@@ -100,6 +102,27 @@ if(BUILD_TESTING)
   )
   add_test(NAME qhostty_split_algorithms
     COMMAND qhostty_split_algorithms_test)
+
+  qt_add_executable(qhostty_key_event_translation_test
+    tests/tst_KeyEventTranslation.cpp
+    src/KeyEventTranslation.cpp
+    src/KeyEventTranslation.h
+  )
+  add_dependencies(qhostty_key_event_translation_test qhostty_libghostty)
+  target_include_directories(qhostty_key_event_translation_test PRIVATE
+    src
+    "${GHOSTTY_PREFIX}/include"
+  )
+  target_compile_features(qhostty_key_event_translation_test PRIVATE cxx_std_20)
+  target_compile_options(qhostty_key_event_translation_test PRIVATE
+    -Wall -Wextra -Wpedantic)
+  target_link_libraries(qhostty_key_event_translation_test PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Test
+  )
+  add_test(NAME qhostty_key_event_translation
+    COMMAND qhostty_key_event_translation_test)
 
   qt_add_executable(qhostty_window_actions_test
     tests/tst_WindowActions.cpp)

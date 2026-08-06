@@ -95,6 +95,7 @@ pub const App = struct {
         text: ?[:0]const u8,
         unshifted_codepoint: u32,
         composing: bool,
+        logical_key: input.Key,
 
         /// Convert a libghostty key event into a core key event.
         fn core(self: KeyEvent) ?input.KeyEvent {
@@ -108,11 +109,17 @@ pub const App = struct {
             const physical_key = keycode: for (input.keycodes.entries) |entry| {
                 if (entry.native == self.keycode) break :keycode entry.key;
             } else .unidentified;
+            const key = if (self.logical_key != .unidentified and
+                (physical_key.shouldBeRemappable() or
+                    self.logical_key.shouldBeRemappable()))
+                self.logical_key
+            else
+                physical_key;
 
             // Build our final key event
             return .{
                 .action = self.action,
-                .key = physical_key,
+                .key = key,
                 .mods = self.mods,
                 .consumed_mods = self.consumed_mods,
                 .composing = self.composing,
@@ -1337,6 +1344,7 @@ pub const CAPI = struct {
         text: ?[*:0]const u8,
         unshifted_codepoint: u32,
         composing: bool,
+        logical_key: c_int,
 
         /// Convert to Zig key event.
         fn keyEvent(self: KeyEvent) App.KeyEvent {
@@ -1354,6 +1362,10 @@ pub const CAPI = struct {
                 .text = if (self.text) |ptr| std.mem.sliceTo(ptr, 0) else null,
                 .unshifted_codepoint = self.unshifted_codepoint,
                 .composing = self.composing,
+                .logical_key = std.enums.fromInt(
+                    input.Key,
+                    self.logical_key,
+                ) orelse .unidentified,
             };
         }
     };

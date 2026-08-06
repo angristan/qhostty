@@ -65,7 +65,21 @@ class WindowActionsTest final : public QObject {
   void calculatesQuickTerminalGeometry();
   void enumeratesGlobalBindings();
   void mapsMouseCoordinates();
+  void keepsTabAsTerminalInput();
 };
+
+void WindowActionsTest::keepsTabAsTerminalInput() {
+  GhosttyApp ghostty;
+  QVERIFY(ghostty.initialize());
+  MainWindow window(&ghostty);
+  window.show();
+  TerminalWidget* terminal = window.currentTab()->activeTerminal();
+  QVERIFY(terminal != nullptr);
+  terminal->setFocus();
+  QTRY_VERIFY(terminal->hasFocus());
+  QTest::keyClick(terminal, Qt::Key_Tab);
+  QCOMPARE(QApplication::focusWidget(), terminal);
+}
 
 void WindowActionsTest::mapsMouseCoordinates() {
   const QPointF logicalPosition(37.25, 81.5);
@@ -222,6 +236,30 @@ void WindowActionsTest::routesTerminalStateActions() {
   action.action.command_finished = {-1, 0};
   QVERIFY(terminal->handleAction(action).value_or(false));
   QVERIFY(!notifyNext->isChecked());
+
+  action = {};
+  action.tag = GHOSTTY_ACTION_MOUSE_SHAPE;
+  action.action.mouse_shape = GHOSTTY_MOUSE_SHAPE_TEXT;
+  QVERIFY(terminal->handleAction(action).value_or(false));
+  QCOMPARE(terminal->cursor().shape(), Qt::IBeamCursor);
+
+  action = {};
+  action.tag = GHOSTTY_ACTION_MOUSE_VISIBILITY;
+  action.action.mouse_visibility = GHOSTTY_MOUSE_HIDDEN;
+  QVERIFY(terminal->handleAction(action).value_or(false));
+  QCOMPARE(terminal->cursor().shape(), Qt::BlankCursor);
+
+  action = {};
+  action.tag = GHOSTTY_ACTION_MOUSE_SHAPE;
+  action.action.mouse_shape = GHOSTTY_MOUSE_SHAPE_POINTER;
+  QVERIFY(terminal->handleAction(action).value_or(false));
+  QCOMPARE(terminal->cursor().shape(), Qt::BlankCursor);
+
+  action = {};
+  action.tag = GHOSTTY_ACTION_MOUSE_VISIBILITY;
+  action.action.mouse_visibility = GHOSTTY_MOUSE_VISIBLE;
+  QVERIFY(terminal->handleAction(action).value_or(false));
+  QCOMPARE(terminal->cursor().shape(), Qt::PointingHandCursor);
 
   action = {};
   action.tag = GHOSTTY_ACTION_GOTO_TAB;

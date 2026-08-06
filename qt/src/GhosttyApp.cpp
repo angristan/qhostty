@@ -7,6 +7,7 @@
 #include "TerminalWidget.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QCoreApplication>
 #include <QDBusConnection>
 #include <QDBusMessage>
@@ -176,7 +177,8 @@ bool GhosttyApp::initialize() {
 
   ghostty_runtime_config_s runtime{};
   runtime.userdata = this;
-  runtime.supports_selection_clipboard = true;
+  runtime.supports_selection_clipboard =
+      QGuiApplication::clipboard()->supportsSelection();
   runtime.wakeup_cb = &GhosttyApp::wakeupCallback;
   runtime.action_cb = &GhosttyApp::actionCallback;
   runtime.read_clipboard_cb = &GhosttyApp::readClipboardCallback;

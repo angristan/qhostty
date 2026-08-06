@@ -3,6 +3,7 @@
 #include "GhosttyApp.h"
 #include "InputCoordinates.h"
 #include "InspectorWindow.h"
+#include "KeyEventTranslation.h"
 
 #include <QAction>
 #include <QApplication>
@@ -55,6 +56,8 @@ TerminalWidget::TerminalWidget(GhosttyApp* app,
 
   m_config = baseConfig != nullptr ? *baseConfig : ghostty_surface_config_new();
   m_appliedConfig = ghostty_config_clone(m_app->config());
+  ghostty_config_get(m_appliedConfig, &m_focusFollowsMouse,
+                     "focus-follows-mouse", std::strlen("focus-follows-mouse"));
   if (m_config.working_directory != nullptr) {
     m_workingDirectory = QString::fromUtf8(m_config.working_directory);
     m_workingDirectoryUtf8 = m_workingDirectory.toUtf8();
@@ -216,6 +219,10 @@ void TerminalWidget::setupContextMenu() {
 }
 
 TerminalWidget::~TerminalWidget() {
+  if (context() != nullptr) {
+    disconnect(context(), &QOpenGLContext::aboutToBeDestroyed, this,
+               &TerminalWidget::cleanupContext);
+  }
   emit surfaceClosing();
   destroySurface();
   if (m_appliedConfig != nullptr) {
@@ -254,10 +261,13 @@ bool TerminalWidget::readClipboard(ghostty_clipboard_e location, void* state) {
   }
 
   QClipboard* clipboard = QGuiApplication::clipboard();
-  const QClipboard::Mode mode =
-      location == GHOSTTY_CLIPBOARD_SELECTION && clipboard->supportsSelection()
-          ? QClipboard::Selection
-          : QClipboard::Clipboard;
+  if (location == GHOSTTY_CLIPBOARD_SELECTION &&
+      !clipboard->supportsSelection()) {
+    return false;
+  }
+  const QClipboard::Mode mode = location == GHOSTTY_CLIPBOARD_SELECTION
+                                    ? QClipboard::Selection
+                                    : QClipboard::Clipboard;
   const QMimeData* mime = clipboard->mimeData(mode);
   if (mime == nullptr || !mime->hasText()) {
     return false;
@@ -320,6 +330,12 @@ void TerminalWidget::writeClipboard(ghostty_clipboard_e location,
     }
   }
 
+  QClipboard* clipboard = QGuiApplication::clipboard();
+  if (location == GHOSTTY_CLIPBOARD_SELECTION &&
+      !clipboard->supportsSelection()) {
+    return;
+  }
+
   auto* mime = new QMimeData();
   for (size_t index = 0; index < count; ++index) {
     if (contents[index].mime == nullptr || contents[index].data == nullptr) {
@@ -337,11 +353,9 @@ void TerminalWidget::writeClipboard(ghostty_clipboard_e location,
     }
   }
 
-  QClipboard* clipboard = QGuiApplication::clipboard();
-  const QClipboard::Mode mode =
-      location == GHOSTTY_CLIPBOARD_SELECTION && clipboard->supportsSelection()
-          ? QClipboard::Selection
-          : QClipboard::Clipboard;
+  const QClipboard::Mode mode = location == GHOSTTY_CLIPBOARD_SELECTION
+                                    ? QClipboard::Selection
+                                    : QClipboard::Clipboard;
   clipboard->setMimeData(mime, mode);
 }
 
@@ -526,6 +540,10 @@ std::optional<bool> TerminalWidget::handleAction(
       }
       m_appliedConfig = applied;
 
+      m_focusFollowsMouse = false;
+      ghostty_config_get(m_appliedConfig, &m_focusFollowsMouse,
+                         "focus-follows-mouse",
+                         std::strlen("focus-follows-mouse"));
       bool progressEnabled = true;
       ghostty_config_get(m_appliedConfig, &progressEnabled, "progress-style",
                          std::strlen("progress-style"));
@@ -663,6 +681,10 @@ void TerminalWidget::keyPressEvent(QKeyEvent* event) {
 }
 
 void TerminalWidget::keyReleaseEvent(QKeyEvent* event) {
+  if (!ghosttyShouldSendKeyRelease(*event)) {
+    event->accept();
+    return;
+  }
   if (sendKey(event, GHOSTTY_ACTION_RELEASE)) {
     event->accept();
   } else {
@@ -703,14 +725,27 @@ QVariant TerminalWidget::inputMethodQuery(Qt::InputMethodQuery query) const {
 }
 
 void TerminalWidget::mouseMoveEvent(QMouseEvent* event) {
+  if (m_focusFollowsMouse && !hasFocus()) {
+    setFocus(Qt::MouseFocusReason);
+  }
   sendMousePosition(event->position(), event->modifiers());
   event->accept();
 }
 
 void TerminalWidget::mousePressEvent(QMouseEvent* event) {
-  setFocus(Qt::MouseFocusReason);
-  if (event->button() == Qt::RightButton) {
+  const QWidget* focus = QApplication::focusWidget();
+  const bool hadFocus =
+      hasFocus() || focus == this || (focus != nullptr && isAncestorOf(focus));
+  if (event->button() == Qt::LeftButton) {
+    m_suppressLeftMouseRelease = !hadFocus;
+  } else if (event->button() == Qt::RightButton) {
     m_contextMenuPending = false;
+  }
+  setFocus(Qt::MouseFocusReason);
+
+  if (event->button() == Qt::LeftButton && !hadFocus) {
+    event->accept();
+    return;
   }
   if (m_surface != nullptr) {
     sendMousePosition(event->position(), event->modifiers());
@@ -726,6 +761,11 @@ void TerminalWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void TerminalWidget::mouseReleaseEvent(QMouseEvent* event) {
+  if (event->button() == Qt::LeftButton && m_suppressLeftMouseRelease) {
+    m_suppressLeftMouseRelease = false;
+    event->accept();
+    return;
+  }
   if (m_surface != nullptr) {
     sendMousePosition(event->position(), event->modifiers());
     ghostty_surface_mouse_button(m_surface, GHOSTTY_MOUSE_RELEASE,
@@ -753,19 +793,28 @@ void TerminalWidget::wheelEvent(QWheelEvent* event) {
   event->accept();
 }
 
-void TerminalWidget::focusInEvent(QFocusEvent* event) {
-  if (m_surface != nullptr) {
-    ghostty_surface_set_focus(m_surface, true);
+void TerminalWidget::leaveEvent(QEvent* event) {
+  if (m_surface != nullptr && QGuiApplication::mouseButtons() == Qt::NoButton) {
+    ghostty_surface_mouse_pos(m_surface, -1, -1,
+                              modifiers(QGuiApplication::keyboardModifiers()));
   }
+  QOpenGLWidget::leaveEvent(event);
+}
+
+void TerminalWidget::focusInEvent(QFocusEvent* event) {
+  scheduleSurfaceFocus(true);
   emit focused();
   QOpenGLWidget::focusInEvent(event);
 }
 
 void TerminalWidget::focusOutEvent(QFocusEvent* event) {
-  if (m_surface != nullptr) {
-    ghostty_surface_set_focus(m_surface, false);
-  }
+  scheduleSurfaceFocus(false);
   QOpenGLWidget::focusOutEvent(event);
+}
+
+bool TerminalWidget::focusNextPrevChild(bool) {
+  // Tab and Backtab are terminal input, not Qt focus traversal.
+  return false;
 }
 
 void TerminalWidget::showEvent(QShowEvent* event) {
@@ -881,7 +930,6 @@ bool TerminalWidget::sendKey(QKeyEvent* event, ghostty_input_action_e action) {
     return false;
   }
 
-  const QByteArray text = event->text().toUtf8();
   int modifierBits = modifiers(event->modifiers());
   switch (event->nativeScanCode()) {
     case 0x3e:
@@ -900,16 +948,11 @@ bool TerminalWidget::sendKey(QKeyEvent* event, ghostty_input_action_e action) {
       break;
   }
 
-  uint32_t unshifted = 0;
-  const int qtKey = event->key();
-  if (qtKey >= Qt::Key_A && qtKey <= Qt::Key_Z) {
-    unshifted = static_cast<uint32_t>('a' + qtKey - Qt::Key_A);
-  } else if (qtKey >= 0x20 && qtKey < 0x01000000) {
-    unshifted = static_cast<uint32_t>(qtKey);
-  }
+  const uint32_t unshifted = ghosttyUnshiftedCodepoint(*event);
+  const QByteArray text = ghosttyKeyText(*event, unshifted);
 
   int consumedBits = GHOSTTY_MODS_NONE;
-  const std::u32string codepoints = event->text().toStdU32String();
+  const std::u32string codepoints = QString::fromUtf8(text).toStdU32String();
   if (event->modifiers().testFlag(Qt::ShiftModifier) && unshifted != 0 &&
       !codepoints.empty() && codepoints.front() != unshifted) {
     consumedBits |= GHOSTTY_MODS_SHIFT;
@@ -923,6 +966,7 @@ bool TerminalWidget::sendKey(QKeyEvent* event, ghostty_input_action_e action) {
   key.text = text.isEmpty() ? nullptr : text.constData();
   key.unshifted_codepoint = unshifted;
   key.composing = m_composing;
+  key.logical_key = ghosttyLogicalKey(*event);
   return ghostty_surface_key(m_surface, key);
 }
 
@@ -939,15 +983,57 @@ void TerminalWidget::sendMousePosition(
 }
 
 void TerminalWidget::setMouseShape(ghostty_action_mouse_shape_e shape) {
-  switch (shape) {
-    case GHOSTTY_MOUSE_SHAPE_TEXT:
-      setCursor(Qt::IBeamCursor);
+  m_mouseShape = shape;
+  applyMouseCursor();
+}
+
+void TerminalWidget::setMouseVisible(bool visible) {
+  m_mouseVisible = visible;
+  applyMouseCursor();
+}
+
+void TerminalWidget::applyMouseCursor() {
+  if (!m_mouseVisible) {
+    setCursor(Qt::BlankCursor);
+    return;
+  }
+
+  switch (m_mouseShape) {
+    case GHOSTTY_MOUSE_SHAPE_HELP:
+      setCursor(Qt::WhatsThisCursor);
       break;
     case GHOSTTY_MOUSE_SHAPE_POINTER:
+    case GHOSTTY_MOUSE_SHAPE_ZOOM_IN:
+    case GHOSTTY_MOUSE_SHAPE_ZOOM_OUT:
       setCursor(Qt::PointingHandCursor);
       break;
+    case GHOSTTY_MOUSE_SHAPE_PROGRESS:
+      setCursor(Qt::BusyCursor);
+      break;
+    case GHOSTTY_MOUSE_SHAPE_WAIT:
+      setCursor(Qt::WaitCursor);
+      break;
+    case GHOSTTY_MOUSE_SHAPE_CELL:
     case GHOSTTY_MOUSE_SHAPE_CROSSHAIR:
       setCursor(Qt::CrossCursor);
+      break;
+    case GHOSTTY_MOUSE_SHAPE_TEXT:
+    case GHOSTTY_MOUSE_SHAPE_VERTICAL_TEXT:
+      setCursor(Qt::IBeamCursor);
+      break;
+    case GHOSTTY_MOUSE_SHAPE_ALIAS:
+      setCursor(Qt::DragLinkCursor);
+      break;
+    case GHOSTTY_MOUSE_SHAPE_COPY:
+      setCursor(Qt::DragCopyCursor);
+      break;
+    case GHOSTTY_MOUSE_SHAPE_MOVE:
+    case GHOSTTY_MOUSE_SHAPE_ALL_SCROLL:
+      setCursor(Qt::SizeAllCursor);
+      break;
+    case GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED:
+    case GHOSTTY_MOUSE_SHAPE_NO_DROP:
+      setCursor(Qt::ForbiddenCursor);
       break;
     case GHOSTTY_MOUSE_SHAPE_GRAB:
       setCursor(Qt::OpenHandCursor);
@@ -955,40 +1041,53 @@ void TerminalWidget::setMouseShape(ghostty_action_mouse_shape_e shape) {
     case GHOSTTY_MOUSE_SHAPE_GRABBING:
       setCursor(Qt::ClosedHandCursor);
       break;
-    case GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED:
-    case GHOSTTY_MOUSE_SHAPE_NO_DROP:
-      setCursor(Qt::ForbiddenCursor);
-      break;
+    case GHOSTTY_MOUSE_SHAPE_E_RESIZE:
+    case GHOSTTY_MOUSE_SHAPE_W_RESIZE:
     case GHOSTTY_MOUSE_SHAPE_EW_RESIZE:
     case GHOSTTY_MOUSE_SHAPE_COL_RESIZE:
       setCursor(Qt::SizeHorCursor);
       break;
+    case GHOSTTY_MOUSE_SHAPE_N_RESIZE:
+    case GHOSTTY_MOUSE_SHAPE_S_RESIZE:
     case GHOSTTY_MOUSE_SHAPE_NS_RESIZE:
     case GHOSTTY_MOUSE_SHAPE_ROW_RESIZE:
       setCursor(Qt::SizeVerCursor);
       break;
+    case GHOSTTY_MOUSE_SHAPE_NE_RESIZE:
+    case GHOSTTY_MOUSE_SHAPE_SW_RESIZE:
     case GHOSTTY_MOUSE_SHAPE_NESW_RESIZE:
       setCursor(Qt::SizeBDiagCursor);
       break;
+    case GHOSTTY_MOUSE_SHAPE_NW_RESIZE:
+    case GHOSTTY_MOUSE_SHAPE_SE_RESIZE:
     case GHOSTTY_MOUSE_SHAPE_NWSE_RESIZE:
       setCursor(Qt::SizeFDiagCursor);
       break;
-    case GHOSTTY_MOUSE_SHAPE_WAIT:
-    case GHOSTTY_MOUSE_SHAPE_PROGRESS:
-      setCursor(Qt::WaitCursor);
-      break;
+    case GHOSTTY_MOUSE_SHAPE_DEFAULT:
+    case GHOSTTY_MOUSE_SHAPE_CONTEXT_MENU:
     default:
       setCursor(Qt::ArrowCursor);
       break;
   }
 }
 
-void TerminalWidget::setMouseVisible(bool visible) {
-  if (visible) {
-    unsetCursor();
-  } else {
-    setCursor(Qt::BlankCursor);
+void TerminalWidget::scheduleSurfaceFocus(bool focused) {
+  m_pendingSurfaceFocus = focused;
+  if (m_focusUpdateScheduled) {
+    return;
   }
+  m_focusUpdateScheduled = true;
+  QTimer::singleShot(0, this, [this]() {
+    m_focusUpdateScheduled = false;
+    if (!m_pendingSurfaceFocus.has_value()) {
+      return;
+    }
+    const bool focused = m_pendingSurfaceFocus.value();
+    m_pendingSurfaceFocus.reset();
+    if (m_surface != nullptr) {
+      ghostty_surface_set_focus(m_surface, focused);
+    }
+  });
 }
 
 bool TerminalWidget::runBindingAction(const QString& action) {
@@ -1253,6 +1352,18 @@ ghostty_input_mouse_button_e TerminalWidget::mouseButton(
       return GHOSTTY_MOUSE_FOUR;
     case Qt::ForwardButton:
       return GHOSTTY_MOUSE_FIVE;
+    case Qt::TaskButton:
+      return GHOSTTY_MOUSE_SIX;
+    case Qt::ExtraButton4:
+      return GHOSTTY_MOUSE_SEVEN;
+    case Qt::ExtraButton5:
+      return GHOSTTY_MOUSE_EIGHT;
+    case Qt::ExtraButton6:
+      return GHOSTTY_MOUSE_NINE;
+    case Qt::ExtraButton7:
+      return GHOSTTY_MOUSE_TEN;
+    case Qt::ExtraButton8:
+      return GHOSTTY_MOUSE_ELEVEN;
     default:
       return GHOSTTY_MOUSE_UNKNOWN;
   }

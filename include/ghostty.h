@@ -356,6 +356,7 @@ typedef struct {
   const char* text;
   uint32_t unshifted_codepoint;
   bool composing;
+  ghostty_input_key_e logical_key;
 } ghostty_input_key_s;
 
 typedef enum {
