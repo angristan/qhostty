@@ -1,0 +1,10 @@
+<RCC>
+  <qresource prefix="/icons">
+    <file alias="ghostty-16.png">../../images/gnome/16.png</file>
+    <file alias="ghostty-32.png">../../images/gnome/32.png</file>
+    <file alias="ghostty-64.png">../../images/gnome/64.png</file>
+    <file alias="ghostty-128.png">../../images/gnome/128.png</file>
+    <file alias="ghostty-256.png">../../images/gnome/256.png</file>
+    <file alias="ghostty-512.png">../../images/gnome/512.png</file>
+  </qresource>
+</RCC>

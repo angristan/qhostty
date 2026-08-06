@@ -64,7 +64,10 @@ if(TARGET KF6::GlobalAccel)
     QHOSTTY_HAS_GLOBAL_ACCEL=1)
 endif()
 
-qt_add_executable(qhostty src/main.cpp)
+qt_add_executable(qhostty
+  src/main.cpp
+  resources/qhostty.qrc
+)
 target_compile_options(qhostty PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(qhostty PRIVATE qhostty_frontend)
 set_target_properties(qhostty PROPERTIES

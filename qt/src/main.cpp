@@ -44,8 +44,13 @@ int main(int argc, char** argv) {
       QStringLiteral("angristan.github.io"));
   QApplication::setDesktopFileName(
       QStringLiteral("io.github.angristan.qhostty"));
-  QApplication::setWindowIcon(
-      QIcon::fromTheme(QStringLiteral("io.github.angristan.qhostty")));
+  QIcon bundledIcon;
+  for (const int size : {16, 32, 64, 128, 256, 512}) {
+    bundledIcon.addFile(QStringLiteral(":/icons/ghostty-%1.png").arg(size),
+                        QSize(size, size));
+  }
+  QApplication::setWindowIcon(QIcon::fromTheme(
+      QStringLiteral("io.github.angristan.qhostty"), bundledIcon));
 
   QString runtimeDirectory =
       QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
