@@ -9,8 +9,7 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui Widgets OpenGL OpenGLWidg
 
 include(cmake/Ghostty.cmake)
 
-qt_add_executable(qhostty
-  src/main.cpp
+qt_add_library(qhostty_frontend STATIC
   src/GhosttyApp.cpp
   src/GhosttyApp.h
   src/MainWindow.cpp
@@ -22,11 +21,11 @@ qt_add_executable(qhostty
   src/TerminalWidget.cpp
   src/TerminalWidget.h
 )
-add_dependencies(qhostty qhostty_libghostty)
-
-target_compile_features(qhostty PRIVATE cxx_std_20)
-target_compile_options(qhostty PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(qhostty PRIVATE
+add_dependencies(qhostty_frontend qhostty_libghostty)
+target_include_directories(qhostty_frontend PUBLIC src)
+target_compile_features(qhostty_frontend PUBLIC cxx_std_20)
+target_compile_options(qhostty_frontend PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(qhostty_frontend PUBLIC
   Ghostty::Core
   Qt6::Core
   Qt6::DBus
@@ -36,6 +35,9 @@ target_link_libraries(qhostty PRIVATE
   Qt6::OpenGLWidgets
 )
 
+qt_add_executable(qhostty src/main.cpp)
+target_compile_options(qhostty PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(qhostty PRIVATE qhostty_frontend)
 set_target_properties(qhostty PROPERTIES
   OUTPUT_NAME qhostty
   BUILD_RPATH "${GHOSTTY_PREFIX}/lib"
@@ -64,6 +66,20 @@ if(BUILD_TESTING)
   )
   add_test(NAME qhostty_split_algorithms
     COMMAND qhostty_split_algorithms_test)
+
+  qt_add_executable(qhostty_window_actions_test
+    tests/tst_WindowActions.cpp)
+  target_compile_options(qhostty_window_actions_test PRIVATE
+    -Wall -Wextra -Wpedantic)
+  target_link_libraries(qhostty_window_actions_test PRIVATE
+    qhostty_frontend
+    Qt6::Test
+  )
+  set_target_properties(qhostty_window_actions_test PROPERTIES
+    BUILD_RPATH "${GHOSTTY_PREFIX}/lib")
+  add_test(NAME qhostty_window_actions COMMAND qhostty_window_actions_test)
+  set_tests_properties(qhostty_window_actions PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
 include(GNUInstallDirs)
