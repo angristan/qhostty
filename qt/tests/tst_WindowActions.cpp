@@ -1,21 +1,91 @@
 #include "GhosttyApp.h"
 #include "MainWindow.h"
+#include "QuickTerminal.h"
 #include "TerminalTab.h"
 #include "TerminalWidget.h"
 
 #include <QApplication>
 #include <QStackedWidget>
 #include <QTabBar>
+#include <QTemporaryFile>
 #include <QtTest>
 
 #include <cstdlib>
+
+namespace {
+struct EnumeratedBinding {
+  int count = 0;
+  ghostty_input_trigger_s trigger{};
+  QString action;
+};
+
+bool captureGlobalBinding(void* userdata,
+                          ghostty_input_trigger_s trigger,
+                          const char* action,
+                          uintptr_t actionLength) {
+  auto* result = static_cast<EnumeratedBinding*>(userdata);
+  ++result->count;
+  result->trigger = trigger;
+  result->action =
+      QString::fromUtf8(action, static_cast<qsizetype>(actionLength));
+  return true;
+}
+}  // namespace
 
 class WindowActionsTest final : public QObject {
   Q_OBJECT
 
  private slots:
   void routesTabAndSplitActions();
+  void calculatesQuickTerminalGeometry();
+  void enumeratesGlobalBindings();
 };
+
+void WindowActionsTest::enumeratesGlobalBindings() {
+  QTemporaryFile file;
+  QVERIFY(file.open());
+  QCOMPARE(file.write("keybind = global:ctrl+shift+g=toggle_quick_terminal\n"),
+           52);
+  QVERIFY(file.flush());
+
+  ghostty_config_t config = ghostty_config_new();
+  QVERIFY(config != nullptr);
+  const QByteArray path = file.fileName().toUtf8();
+  ghostty_config_load_file(config, path.constData());
+  ghostty_config_finalize(config);
+
+  EnumeratedBinding binding;
+  ghostty_config_enumerate_global_keybinds(config, &binding,
+                                           &captureGlobalBinding);
+  QCOMPARE(binding.count, 1);
+  QCOMPARE(binding.action, QStringLiteral("toggle_quick_terminal"));
+  QCOMPARE(binding.trigger.tag, GHOSTTY_TRIGGER_UNICODE);
+  QCOMPARE(binding.trigger.key.unicode, static_cast<uint32_t>('g'));
+  QVERIFY(binding.trigger.mods & GHOSTTY_MODS_CTRL);
+  QVERIFY(binding.trigger.mods & GHOSTTY_MODS_SHIFT);
+  ghostty_config_free(config);
+}
+
+void WindowActionsTest::calculatesQuickTerminalGeometry() {
+  QuickTerminalSettings settings;
+  const QRect landscape(100, 50, 1920, 1080);
+  QCOMPARE(settings.geometry(landscape), QRect(100, 50, 1920, 400));
+
+  settings.position = QuickTerminalSettings::Position::Left;
+  QCOMPARE(settings.geometry(landscape), QRect(100, 50, 400, 1080));
+
+  settings.position = QuickTerminalSettings::Position::Top;
+  settings.size.primary.tag = GHOSTTY_QUICK_TERMINAL_SIZE_PERCENTAGE;
+  settings.size.primary.value.percentage = 50;
+  settings.size.secondary.tag = GHOSTTY_QUICK_TERMINAL_SIZE_PIXELS;
+  settings.size.secondary.value.pixels = 800;
+  QCOMPARE(settings.geometry(landscape), QRect(660, 50, 800, 540));
+
+  settings = {};
+  settings.position = QuickTerminalSettings::Position::Center;
+  QCOMPARE(settings.geometry(QRect(0, 0, 1080, 1920)),
+           QRect(340, 560, 400, 800));
+}
 
 void WindowActionsTest::routesTabAndSplitActions() {
   GhosttyApp ghostty;

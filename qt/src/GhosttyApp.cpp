@@ -1,6 +1,9 @@
 #include "GhosttyApp.h"
 
+#include "GlobalShortcuts.h"
 #include "MainWindow.h"
+#include "QuickTerminal.h"
+#include "TerminalTab.h"
 #include "TerminalWidget.h"
 
 #include <QApplication>
@@ -163,6 +166,9 @@ bool GhosttyApp::initialize() {
     return false;
   }
 
+  m_globalShortcuts = new GlobalShortcuts(this, this);
+  m_globalShortcuts->refresh(m_config);
+
   connect(qGuiApp, &QGuiApplication::applicationStateChanged, this,
           [this](Qt::ApplicationState state) {
             if (m_app != nullptr) {
@@ -231,6 +237,40 @@ MainWindow* GhosttyApp::createWindow(
   auto* window = new MainWindow(this, nullptr, baseConfig);
   window->show();
   return window;
+}
+
+void GhosttyApp::toggleQuickTerminal() {
+  if (m_quickTerminal != nullptr && m_quickTerminal->isVisible()) {
+    m_quickTerminal->hide();
+    return;
+  }
+
+  if (m_quickTerminal == nullptr) {
+    m_quickTerminal = new MainWindow(this, nullptr, nullptr, true,
+                                     MainWindow::Role::QuickTerminal);
+  }
+  showQuickTerminal(m_quickTerminal,
+                    QuickTerminalSettings::fromConfig(m_config));
+}
+
+bool GhosttyApp::performBindingAction(const QString& action) {
+  if (action == QStringLiteral("toggle_quick_terminal")) {
+    toggleQuickTerminal();
+    return true;
+  }
+
+  auto* window = qobject_cast<MainWindow*>(QApplication::activeWindow());
+  if (window == nullptr) {
+    for (MainWindow* candidate : m_windows) {
+      if (candidate != nullptr && candidate->isVisible()) {
+        window = candidate;
+        break;
+      }
+    }
+  }
+  TerminalTab* tab = window != nullptr ? window->currentTab() : nullptr;
+  TerminalWidget* terminal = tab != nullptr ? tab->activeTerminal() : nullptr;
+  return terminal != nullptr && terminal->runBindingAction(action);
 }
 
 MainWindow* GhosttyApp::activate(const QStringList& arguments,
@@ -376,10 +416,16 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
       return true;
     }
     case GHOSTTY_ACTION_GOTO_WINDOW: {
-      if (m_windows.size() < 2 || window == nullptr) {
+      QList<MainWindow*> windows;
+      for (MainWindow* candidate : m_windows) {
+        if (candidate != nullptr && !candidate->isQuickTerminal()) {
+          windows.append(candidate);
+        }
+      }
+      if (windows.size() < 2 || window == nullptr ||
+          window->isQuickTerminal()) {
         return false;
       }
-      const QList<MainWindow*>& windows = m_windows;
       qsizetype index = windows.indexOf(window);
       const qsizetype delta =
           action.action.goto_window == GHOSTTY_GOTO_WINDOW_PREVIOUS ? -1 : 1;
@@ -389,13 +435,17 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
       windows.at(index)->activateWindow();
       return true;
     }
+    case GHOSTTY_ACTION_TOGGLE_QUICK_TERMINAL:
+      toggleQuickTerminal();
+      return true;
     case GHOSTTY_ACTION_TOGGLE_VISIBILITY: {
       const bool anyVisible = std::any_of(
           m_windows.cbegin(), m_windows.cend(), [](MainWindow* candidate) {
-            return candidate != nullptr && candidate->isVisible();
+            return candidate != nullptr && !candidate->isQuickTerminal() &&
+                   candidate->isVisible();
           });
       for (MainWindow* candidate : m_windows) {
-        if (candidate == nullptr) {
+        if (candidate == nullptr || candidate->isQuickTerminal()) {
           continue;
         }
         if (anyVisible) {
@@ -453,6 +503,13 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
         }
         ghostty_config_free(m_config);
         m_config = applied;
+        if (m_globalShortcuts != nullptr) {
+          m_globalShortcuts->refresh(m_config);
+        }
+        if (m_quickTerminal != nullptr && m_quickTerminal->isVisible()) {
+          showQuickTerminal(m_quickTerminal,
+                            QuickTerminalSettings::fromConfig(m_config));
+        }
       }
       return true;
     case GHOSTTY_ACTION_QUIT_TIMER:

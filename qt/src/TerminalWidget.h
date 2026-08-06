@@ -47,6 +47,7 @@ class TerminalWidget final : public QOpenGLWidget {
                       bool confirm);
   void requestClose(bool processAlive);
   bool handleAction(const ghostty_action_s& action);
+  bool runBindingAction(const QString& action);
 
  signals:
   void focused();
@@ -92,7 +93,6 @@ class TerminalWidget final : public QOpenGLWidget {
                          Qt::KeyboardModifiers modifiers);
   void setMouseShape(ghostty_action_mouse_shape_e shape);
   void setMouseVisible(bool visible);
-  bool runBindingAction(const QString& action);
   void showSearch(const char* needle);
   void updateSearchCount();
   void layoutOverlays();

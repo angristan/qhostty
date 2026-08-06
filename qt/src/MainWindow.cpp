@@ -5,10 +5,12 @@
 #include "TerminalWidget.h"
 
 #include <QCloseEvent>
+#include <QEvent>
 #include <QInputDialog>
 #include <QMenu>
 #include <QStackedWidget>
 #include <QTabBar>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -16,11 +18,13 @@
 MainWindow::MainWindow(GhosttyApp* app,
                        QWidget* parent,
                        const ghostty_surface_config_s* baseConfig,
-                       bool createInitialTab)
+                       bool createInitialTab,
+                       Role role)
     : QMainWindow(parent),
       m_app(app),
       m_tabBar(new QTabBar(this)),
-      m_stack(new QStackedWidget(this)) {
+      m_stack(new QStackedWidget(this)),
+      m_role(role) {
   setAttribute(Qt::WA_DeleteOnClose, true);
   setObjectName(QStringLiteral("qhostty-window"));
   setWindowTitle(QStringLiteral("Qhostty"));
@@ -278,7 +282,25 @@ void MainWindow::closeConfirmed() {
   close();
 }
 
+void MainWindow::changeEvent(QEvent* event) {
+  QMainWindow::changeEvent(event);
+  if (event->type() == QEvent::ActivationChange && isQuickTerminal() &&
+      m_quickTerminalAutohide && isVisible() && !isActiveWindow()) {
+    QTimer::singleShot(50, this, [this]() {
+      if (isVisible() && !isActiveWindow()) {
+        hide();
+      }
+    });
+  }
+}
+
 void MainWindow::closeEvent(QCloseEvent* event) {
+  if (isQuickTerminal() && !property("qhosttyCloseConfirmed").toBool() &&
+      !property("qhosttyDestroyQuickTerminal").toBool()) {
+    event->ignore();
+    hide();
+    return;
+  }
   if (property("qhosttyCloseConfirmed").toBool() || canClose()) {
     event->accept();
   } else {
@@ -311,6 +333,9 @@ void MainWindow::closeTab(int index) {
   m_tabBar->removeTab(index);
   tab->deleteLater();
   if (m_tabBar->count() == 0) {
+    if (isQuickTerminal()) {
+      setProperty("qhosttyDestroyQuickTerminal", true);
+    }
     close();
   }
 }
@@ -334,6 +359,9 @@ void MainWindow::detachTab(int index) {
   detached->resize(size());
   detached->show();
   if (m_tabBar->count() == 0) {
+    if (isQuickTerminal()) {
+      setProperty("qhosttyDestroyQuickTerminal", true);
+    }
     close();
   }
 }

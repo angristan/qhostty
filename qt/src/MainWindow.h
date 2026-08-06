@@ -6,6 +6,7 @@
 
 class GhosttyApp;
 class QCloseEvent;
+class QEvent;
 class QStackedWidget;
 class QTabBar;
 class TerminalTab;
@@ -15,10 +16,16 @@ class MainWindow final : public QMainWindow {
   Q_OBJECT
 
  public:
+  enum class Role {
+    Normal,
+    QuickTerminal,
+  };
+
   explicit MainWindow(GhosttyApp* app,
                       QWidget* parent = nullptr,
                       const ghostty_surface_config_s* baseConfig = nullptr,
-                      bool createInitialTab = true);
+                      bool createInitialTab = true,
+                      Role role = Role::Normal);
   ~MainWindow() override;
 
   int addTab(const ghostty_surface_config_s* baseConfig = nullptr);
@@ -26,9 +33,16 @@ class MainWindow final : public QMainWindow {
   bool handleAction(TerminalWidget* source, const ghostty_action_s& action);
   [[nodiscard]] TerminalTab* currentTab() const;
   [[nodiscard]] bool canClose() const;
+  [[nodiscard]] bool isQuickTerminal() const {
+    return m_role == Role::QuickTerminal;
+  }
+  void setQuickTerminalAutohide(bool enabled) {
+    m_quickTerminalAutohide = enabled;
+  }
   void closeConfirmed();
 
  protected:
+  void changeEvent(QEvent* event) override;
   void closeEvent(QCloseEvent* event) override;
 
  private:
@@ -42,4 +56,6 @@ class MainWindow final : public QMainWindow {
   GhosttyApp* m_app;
   QTabBar* m_tabBar;
   QStackedWidget* m_stack;
+  Role m_role;
+  bool m_quickTerminalAutohide = false;
 };

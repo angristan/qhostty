@@ -2,6 +2,7 @@
 
 #include <QList>
 #include <QObject>
+#include <QPointer>
 #include <QSet>
 #include <QStringList>
 
@@ -9,6 +10,7 @@
 
 #include <ghostty.h>
 
+class GlobalShortcuts;
 class MainWindow;
 class TerminalWidget;
 
@@ -30,6 +32,8 @@ class GhosttyApp final : public QObject {
       const ghostty_surface_config_s* baseConfig = nullptr);
   MainWindow* activate(const QStringList& arguments,
                        const QString& workingDirectory);
+  void toggleQuickTerminal();
+  bool performBindingAction(const QString& action);
   void registerWindow(MainWindow* window);
   void unregisterWindow(MainWindow* window);
   void registerSurface(TerminalWidget* widget);
@@ -64,7 +68,9 @@ class GhosttyApp final : public QObject {
 
   ghostty_config_t m_config = nullptr;
   ghostty_app_t m_app = nullptr;
+  GlobalShortcuts* m_globalShortcuts = nullptr;
   QList<MainWindow*> m_windows;
+  QPointer<MainWindow> m_quickTerminal;
   QSet<TerminalWidget*> m_surfaces;
   std::atomic_bool m_tickQueued = false;
 };

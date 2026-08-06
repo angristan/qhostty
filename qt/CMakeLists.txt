@@ -6,14 +6,21 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui Network Widgets OpenGL OpenGLWidgets)
+find_package(LayerShellQt QUIET)
+find_package(KF6WindowSystem QUIET)
+find_package(KF6GlobalAccel QUIET)
 
 include(cmake/Ghostty.cmake)
 
 qt_add_library(qhostty_frontend STATIC
   src/GhosttyApp.cpp
   src/GhosttyApp.h
+  src/GlobalShortcuts.cpp
+  src/GlobalShortcuts.h
   src/MainWindow.cpp
   src/MainWindow.h
+  src/QuickTerminal.cpp
+  src/QuickTerminal.h
   src/SingleInstance.cpp
   src/SingleInstance.h
   src/SplitAlgorithms.cpp
@@ -37,6 +44,21 @@ target_link_libraries(qhostty_frontend PUBLIC
   Qt6::OpenGL
   Qt6::OpenGLWidgets
 )
+if(TARGET LayerShellQt::Interface)
+  target_link_libraries(qhostty_frontend PRIVATE LayerShellQt::Interface)
+  target_compile_definitions(qhostty_frontend PRIVATE
+    QHOSTTY_HAS_LAYER_SHELL=1)
+endif()
+if(TARGET KF6::WindowSystem)
+  target_link_libraries(qhostty_frontend PRIVATE KF6::WindowSystem)
+  target_compile_definitions(qhostty_frontend PRIVATE
+    QHOSTTY_HAS_KWINDOWSYSTEM=1)
+endif()
+if(TARGET KF6::GlobalAccel)
+  target_link_libraries(qhostty_frontend PRIVATE KF6::GlobalAccel)
+  target_compile_definitions(qhostty_frontend PRIVATE
+    QHOSTTY_HAS_GLOBAL_ACCEL=1)
+endif()
 
 qt_add_executable(qhostty src/main.cpp)
 target_compile_options(qhostty PRIVATE -Wall -Wextra -Wpedantic)
@@ -82,7 +104,8 @@ if(BUILD_TESTING)
     BUILD_RPATH "${GHOSTTY_PREFIX}/lib")
   add_test(NAME qhostty_window_actions COMMAND qhostty_window_actions_test)
   set_tests_properties(qhostty_window_actions PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    ENVIRONMENT
+      "QT_QPA_PLATFORM=offscreen;QHOSTTY_DISABLE_GLOBAL_SHORTCUTS=1")
 
   qt_add_executable(qhostty_single_instance_test
     tests/tst_SingleInstance.cpp
