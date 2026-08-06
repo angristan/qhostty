@@ -1,0 +1,40 @@
+pkgname=qhostty-git
+pkgver=0.1.0.r0.g000000000
+pkgrel=1
+pkgdesc='Native Qt 6 frontend for the Ghostty terminal core'
+arch=(x86_64 aarch64)
+url='https://github.com/angristan/qhostty'
+license=(MIT)
+depends=(gcc-libs glibc ghostty-shell-integration ghostty-terminfo libglvnd qt6-base)
+makedepends=(cmake git ninja zig)
+provides=(qhostty)
+conflicts=(qhostty)
+source=('qhostty::git+https://github.com/angristan/qhostty.git')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd qhostty
+  printf '0.1.0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=9 HEAD)"
+}
+
+prepare() {
+  cd qhostty
+  export ZIG_GLOBAL_CACHE_DIR="$srcdir/zig-global-cache"
+  ./nix/build-support/fetch-zig-cache.sh
+}
+
+build() {
+  export ZIG_GLOBAL_CACHE_DIR="$srcdir/zig-global-cache"
+  cmake -S qhostty/qt -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    -DQHOSTTY_GHOSTTY_OPTIMIZE=ReleaseFast \
+    -DQHOSTTY_GHOSTTY_CPU=baseline
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm644 qhostty/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

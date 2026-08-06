@@ -15,6 +15,8 @@ qt_add_executable(qhostty
   src/GhosttyApp.h
   src/MainWindow.cpp
   src/MainWindow.h
+  src/SplitAlgorithms.cpp
+  src/SplitAlgorithms.h
   src/TerminalTab.cpp
   src/TerminalTab.h
   src/TerminalWidget.cpp
@@ -39,9 +41,47 @@ set_target_properties(qhostty PROPERTIES
   INSTALL_RPATH "$ORIGIN/../lib/qhostty"
 )
 
+include(CTest)
+if(BUILD_TESTING)
+  find_package(Qt6 6.5 REQUIRED COMPONENTS Test)
+  qt_add_executable(qhostty_split_algorithms_test
+    tests/tst_SplitAlgorithms.cpp
+    src/SplitAlgorithms.cpp
+    src/SplitAlgorithms.h
+  )
+  add_dependencies(qhostty_split_algorithms_test qhostty_libghostty)
+  target_include_directories(qhostty_split_algorithms_test PRIVATE
+    src
+    "${GHOSTTY_PREFIX}/include"
+  )
+  target_compile_features(qhostty_split_algorithms_test PRIVATE cxx_std_20)
+  target_compile_options(qhostty_split_algorithms_test PRIVATE
+    -Wall -Wextra -Wpedantic)
+  target_link_libraries(qhostty_split_algorithms_test PRIVATE
+    Qt6::Core
+    Qt6::Test
+  )
+  add_test(NAME qhostty_split_algorithms
+    COMMAND qhostty_split_algorithms_test)
+endif()
+
 include(GNUInstallDirs)
+set(QHOSTTY_APP_ID "io.github.angristan.qhostty")
+
 install(TARGETS qhostty RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES "${GHOSTTY_SHARED}"
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/qhostty"
   RENAME "libghostty.so"
 )
+install(FILES resources/linux/${QHOSTTY_APP_ID}.desktop
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/applications")
+install(FILES resources/linux/${QHOSTTY_APP_ID}.metainfo.xml
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/metainfo")
+install(FILES resources/linux/${QHOSTTY_APP_ID}-servicemenu.desktop
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/kio/servicemenus"
+  RENAME "${QHOSTTY_APP_ID}.desktop")
+foreach(size 16 32 64 128 256 512)
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../images/gnome/${size}.png"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/${size}x${size}/apps"
+    RENAME "${QHOSTTY_APP_ID}.png")
+endforeach()

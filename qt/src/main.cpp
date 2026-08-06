@@ -3,6 +3,7 @@
 
 #include <QApplication>
 #include <QColorSpace>
+#include <QIcon>
 #include <QOpenGLContext>
 #include <QSurfaceFormat>
 
@@ -27,22 +28,21 @@ int main(int argc, char** argv) {
   QSurfaceFormat::setDefaultFormat(format);
 
   QApplication application(argc, argv);
-  QCoreApplication::setApplicationName(QStringLiteral("Qhostty"));
+  QCoreApplication::setApplicationName(QStringLiteral("qhostty"));
+  QGuiApplication::setApplicationDisplayName(QStringLiteral("Qhostty"));
   QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
   QCoreApplication::setOrganizationName(QStringLiteral("angristan"));
+  QCoreApplication::setOrganizationDomain(
+      QStringLiteral("angristan.github.io"));
   QApplication::setDesktopFileName(
       QStringLiteral("io.github.angristan.qhostty"));
+  QApplication::setWindowIcon(
+      QIcon::fromTheme(QStringLiteral("io.github.angristan.qhostty")));
 
   GhosttyApp ghostty;
   if (!ghostty.initialize()) {
     return EXIT_FAILURE;
   }
-
-  QObject::connect(&application, &QGuiApplication::applicationStateChanged,
-                   &ghostty, [&ghostty](Qt::ApplicationState state) {
-                     ghostty_app_set_focus(ghostty.handle(),
-                                           state == Qt::ApplicationActive);
-                   });
 
   ghostty.createWindow();
 

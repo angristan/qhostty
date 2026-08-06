@@ -1,0 +1,24 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Qhostty
+GenericName=Terminal Emulator
+Comment=Qt terminal emulator powered by Ghostty
+TryExec=qhostty
+Exec=qhostty
+Icon=io.github.angristan.qhostty
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;prompt;command;commandline;Qt;KDE;
+StartupNotify=true
+StartupWMClass=io.github.angristan.qhostty
+Terminal=false
+Actions=new-window;
+X-TerminalArgExec=-e
+X-TerminalArgTitle=--title=
+X-TerminalArgDir=--working-directory=
+X-TerminalArgHold=--wait-after-command
+
+[Desktop Action new-window]
+Name=New Window
+Exec=qhostty
+Icon=io.github.angristan.qhostty

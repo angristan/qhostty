@@ -1,14 +1,12 @@
 #include "TerminalTab.h"
 
 #include "GhosttyApp.h"
+#include "SplitAlgorithms.h"
 #include "TerminalWidget.h"
 
 #include <QBoxLayout>
 #include <QMessageBox>
 #include <QSplitter>
-
-#include <algorithm>
-#include <limits>
 
 TerminalTab::TerminalTab(GhosttyApp* app,
                          QWidget* parent,
@@ -150,46 +148,18 @@ bool TerminalTab::focusSplit(ghostty_action_goto_split_e direction) {
     return true;
   }
 
-  const QPoint current = m_active->mapTo(this, m_active->rect().center());
-  TerminalWidget* best = nullptr;
-  qint64 bestScore = std::numeric_limits<qint64>::max();
-
-  for (TerminalWidget* candidate : all) {
-    if (candidate == m_active) {
-      continue;
-    }
-
-    const QPoint point = candidate->mapTo(this, candidate->rect().center());
-    const int dx = point.x() - current.x();
-    const int dy = point.y() - current.y();
-    const bool eligible = (direction == GHOSTTY_GOTO_SPLIT_LEFT && dx < 0) ||
-                          (direction == GHOSTTY_GOTO_SPLIT_RIGHT && dx > 0) ||
-                          (direction == GHOSTTY_GOTO_SPLIT_UP && dy < 0) ||
-                          (direction == GHOSTTY_GOTO_SPLIT_DOWN && dy > 0);
-    if (!eligible) {
-      continue;
-    }
-
-    const qint64 primary = direction == GHOSTTY_GOTO_SPLIT_LEFT ||
-                                   direction == GHOSTTY_GOTO_SPLIT_RIGHT
-                               ? std::abs(dx)
-                               : std::abs(dy);
-    const qint64 secondary = direction == GHOSTTY_GOTO_SPLIT_LEFT ||
-                                     direction == GHOSTTY_GOTO_SPLIT_RIGHT
-                                 ? std::abs(dy)
-                                 : std::abs(dx);
-    const qint64 score = primary * 100000 + secondary;
-    if (score < bestScore) {
-      bestScore = score;
-      best = candidate;
-    }
+  QList<QPoint> centers;
+  centers.reserve(all.size());
+  for (TerminalWidget* terminal : all) {
+    centers.append(terminal->mapTo(this, terminal->rect().center()));
   }
-
-  if (best == nullptr) {
+  const int next =
+      qhostty::directionalNeighbor(centers, currentIndex, direction);
+  if (next < 0) {
     return false;
   }
-  setActive(best);
-  best->setFocus(Qt::ShortcutFocusReason);
+  setActive(all.at(next));
+  m_active->setFocus(Qt::ShortcutFocusReason);
   return true;
 }
 
@@ -215,38 +185,11 @@ bool TerminalTab::resizeSplit(const ghostty_action_resize_split_s& resize) {
 
   QList<int> sizes = splitter->sizes();
   const int index = splitter->indexOf(child);
-  if (index < 0 || index >= sizes.size()) {
-    return false;
-  }
-
   const bool positive = resize.direction == GHOSTTY_RESIZE_SPLIT_RIGHT ||
                         resize.direction == GHOSTTY_RESIZE_SPLIT_DOWN;
-  int neighbor = -1;
-  int activeDelta = 0;
-  if (positive && index + 1 < sizes.size()) {
-    neighbor = index + 1;
-    activeDelta = static_cast<int>(resize.amount);
-  } else if (positive && index > 0) {
-    neighbor = index - 1;
-    activeDelta = -static_cast<int>(resize.amount);
-  } else if (!positive && index > 0) {
-    neighbor = index - 1;
-    activeDelta = static_cast<int>(resize.amount);
-  } else if (!positive && index + 1 < sizes.size()) {
-    neighbor = index + 1;
-    activeDelta = -static_cast<int>(resize.amount);
-  } else {
+  if (!qhostty::resizeAdjacent(sizes, index, positive, resize.amount)) {
     return false;
   }
-
-  const int donor = activeDelta > 0 ? neighbor : index;
-  const int amount = std::min(std::abs(activeDelta), sizes.at(donor) - 1);
-  if (amount <= 0) {
-    return false;
-  }
-  const int applied = activeDelta > 0 ? amount : -amount;
-  sizes[index] += applied;
-  sizes[neighbor] -= applied;
   splitter->setSizes(sizes);
   return true;
 }

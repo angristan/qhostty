@@ -1,0 +1,56 @@
+name: Qhostty
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - '.github/workflows/qhostty.yml'
+      - 'include/ghostty.h'
+      - 'pkg/opengl/**'
+      - 'qt/**'
+      - 'src/apprt/embedded.zig'
+      - 'src/build/SharedDeps.zig'
+      - 'src/renderer/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            appstream cmake desktop-file-utils libfontconfig-dev libfreetype-dev \
+            libgl-dev libharfbuzz-dev libxkbcommon-dev ninja-build qt6-base-dev
+
+      - name: Configure
+        run: cmake -S qt -B build/qt -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build/qt --parallel 2
+
+      - name: Test
+        run: ctest --test-dir build/qt --output-on-failure
+
+      - name: Check runtime linkage
+        run: |
+          build/qt/qhostty +version
+          ! ldd build/qt/qhostty | grep -E 'libgtk|libadwaita'
+
+      - name: Validate installation metadata
+        run: |
+          DESTDIR="$RUNNER_TEMP/qhostty-root" cmake --install build/qt --prefix /usr
+          desktop-file-validate "$RUNNER_TEMP/qhostty-root/usr/share/applications/io.github.angristan.qhostty.desktop"
+          appstreamcli validate --no-net "$RUNNER_TEMP/qhostty-root/usr/share/metainfo/io.github.angristan.qhostty.metainfo.xml"

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Service
+Name=Open Qhostty Here
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=inode/directory;
+Actions=OpenQhosttyHere
+
+[Desktop Action OpenQhosttyHere]
+Name=Open Qhostty Here
+Icon=io.github.angristan.qhostty
+Exec=qhostty --working-directory=%f

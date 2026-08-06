@@ -5,6 +5,8 @@ get_filename_component(GHOSTTY_SOURCE_DIR
 
 set(QHOSTTY_GHOSTTY_OPTIMIZE Debug CACHE STRING
   "Zig optimization mode used for Ghostty")
+set(QHOSTTY_GHOSTTY_CPU baseline CACHE STRING
+  "Zig CPU target used for Ghostty")
 set(GHOSTTY_PREFIX "${CMAKE_BINARY_DIR}/ghostty")
 set(GHOSTTY_SHARED "${GHOSTTY_PREFIX}/lib/ghostty-internal.so")
 set(GHOSTTY_SONAME "${GHOSTTY_PREFIX}/lib/libghostty.so")
@@ -23,6 +25,7 @@ add_custom_target(qhostty_libghostty
     -Demit-macos-app=false
     -Demit-xcframework=false
     "-Doptimize=${QHOSTTY_GHOSTTY_OPTIMIZE}"
+    "-Dcpu=${QHOSTTY_GHOSTTY_CPU}"
     --prefix "${GHOSTTY_PREFIX}"
   COMMAND "${CMAKE_COMMAND}" -E create_symlink
     "ghostty-internal.so" "${GHOSTTY_SONAME}"
