@@ -6,6 +6,7 @@
 #include "TerminalWidget.h"
 
 #include <QCloseEvent>
+#include <QDebug>
 #include <QEvent>
 #include <QInputDialog>
 #include <QMenu>
@@ -107,8 +108,8 @@ int MainWindow::adoptTab(TerminalTab* tab, const QString& title) {
   return index;
 }
 
-bool MainWindow::handleAction(TerminalWidget* source,
-                              const ghostty_action_s& action) {
+std::optional<bool> MainWindow::handleAction(TerminalWidget* source,
+                                             const ghostty_action_s& action) {
   TerminalTab* tab = source != nullptr ? tabFor(source) : currentTab();
   const int targetIndex =
       tab != nullptr ? m_stack->indexOf(tab) : m_tabBar->currentIndex();
@@ -224,6 +225,7 @@ bool MainWindow::handleAction(TerminalWidget* source,
       return true;
     }
     case GHOSTTY_ACTION_TOGGLE_BACKGROUND_OPACITY:
+      qWarning() << "Background-only opacity toggling is unsupported";
       return false;
     case GHOSTTY_ACTION_TOGGLE_TAB_OVERVIEW: {
       QMenu menu(this);
@@ -277,7 +279,7 @@ bool MainWindow::handleAction(TerminalWidget* source,
       close();
       return true;
     default:
-      return false;
+      return std::nullopt;
   }
 }
 
@@ -432,16 +434,21 @@ bool MainWindow::selectTab(int value) {
     return false;
   }
 
-  int index = value;
+  int index = 0;
   if (value == GHOSTTY_GOTO_TAB_PREVIOUS) {
     index = (m_tabBar->currentIndex() - 1 + count) % count;
   } else if (value == GHOSTTY_GOTO_TAB_NEXT) {
     index = (m_tabBar->currentIndex() + 1) % count;
   } else if (value == GHOSTTY_GOTO_TAB_LAST) {
     index = count - 1;
+  } else {
+    if (value <= 0) {
+      return false;
+    }
+    index = std::min(value - 1, count - 1);
   }
 
-  if (index < 0 || index >= count) {
+  if (index == m_tabBar->currentIndex()) {
     return false;
   }
   m_tabBar->setCurrentIndex(index);

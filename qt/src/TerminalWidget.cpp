@@ -290,7 +290,8 @@ void TerminalWidget::requestClose(bool processAlive) {
   emit closeRequested(this);
 }
 
-bool TerminalWidget::handleAction(const ghostty_action_s& action) {
+std::optional<bool> TerminalWidget::handleAction(
+    const ghostty_action_s& action) {
   switch (action.tag) {
     case GHOSTTY_ACTION_RENDER:
       update();
@@ -544,7 +545,7 @@ bool TerminalWidget::handleAction(const ghostty_action_s& action) {
     case GHOSTTY_ACTION_COLOR_CHANGE:
       return true;
     default:
-      return false;
+      return std::nullopt;
   }
 }
 

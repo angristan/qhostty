@@ -19,6 +19,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 
 namespace {
 struct EnumeratedBinding {
@@ -118,14 +119,14 @@ void WindowActionsTest::routesTerminalStateActions() {
   ghostty_config_t previousConfig = terminal->config();
   action.tag = GHOSTTY_ACTION_CONFIG_CHANGE;
   action.action.config_change.config = ghostty.config();
-  QVERIFY(terminal->handleAction(action));
+  QVERIFY(terminal->handleAction(action).value_or(false));
   QVERIFY(terminal->config() != nullptr);
   QVERIFY(terminal->config() != previousConfig);
 
   action = {};
   action.tag = GHOSTTY_ACTION_READONLY;
   action.action.readonly = GHOSTTY_READONLY_ON;
-  QVERIFY(terminal->handleAction(action));
+  QVERIFY(terminal->handleAction(action).value_or(false));
   auto* readonly =
       terminal->findChild<QLabel*>(QStringLiteral("qhostty-readonly"));
   QVERIFY(readonly != nullptr);
@@ -134,7 +135,7 @@ void WindowActionsTest::routesTerminalStateActions() {
   action = {};
   action.tag = GHOSTTY_ACTION_SCROLLBAR;
   action.action.scrollbar = {100, 20, 10};
-  QVERIFY(terminal->handleAction(action));
+  QVERIFY(terminal->handleAction(action).value_or(false));
   auto* scrollbar =
       terminal->findChild<QScrollBar*>(QStringLiteral("qhostty-scrollbar"));
   QVERIFY(scrollbar != nullptr);
@@ -147,7 +148,7 @@ void WindowActionsTest::routesTerminalStateActions() {
   action.action.key_sequence.trigger.tag = GHOSTTY_TRIGGER_UNICODE;
   action.action.key_sequence.trigger.key.unicode = 'g';
   action.action.key_sequence.trigger.mods = GHOSTTY_MODS_CTRL;
-  QVERIFY(terminal->handleAction(action));
+  QVERIFY(terminal->handleAction(action).value_or(false));
   auto* keyState =
       terminal->findChild<QLabel*>(QStringLiteral("qhostty-key-state"));
   QVERIFY(keyState != nullptr);
@@ -158,7 +159,7 @@ void WindowActionsTest::routesTerminalStateActions() {
   action.tag = GHOSTTY_ACTION_PROGRESS_REPORT;
   action.action.progress_report.state = GHOSTTY_PROGRESS_STATE_SET;
   action.action.progress_report.progress = 42;
-  QVERIFY(terminal->handleAction(action));
+  QVERIFY(terminal->handleAction(action).value_or(false));
   auto* progress =
       terminal->findChild<QProgressBar*>(QStringLiteral("qhostty-progress"));
   QVERIFY(progress != nullptr);
@@ -173,12 +174,16 @@ void WindowActionsTest::routesTerminalStateActions() {
   action = {};
   action.tag = GHOSTTY_ACTION_INSPECTOR;
   action.action.inspector = GHOSTTY_INSPECTOR_SHOW;
-  QVERIFY(terminal->handleAction(action));
+  QVERIFY(terminal->handleAction(action).value_or(false));
   auto* inspector = window.findChild<InspectorWindow*>();
   QVERIFY(inspector != nullptr);
   action.action.inspector = GHOSTTY_INSPECTOR_HIDE;
-  QVERIFY(terminal->handleAction(action));
+  QVERIFY(terminal->handleAction(action).value_or(false));
   QVERIFY(inspector->isHidden());
+
+  action = {};
+  action.tag = GHOSTTY_ACTION_GOTO_TAB;
+  QVERIFY(!terminal->handleAction(action).has_value());
 }
 
 void WindowActionsTest::routesTabAndSplitActions() {
@@ -203,45 +208,63 @@ void WindowActionsTest::routesTabAndSplitActions() {
   ghostty_action_s action{};
   action.tag = GHOSTTY_ACTION_FLOAT_WINDOW;
   action.action.float_window = GHOSTTY_FLOAT_WINDOW_ON;
-  QVERIFY(window.handleAction(source, action));
+  QVERIFY(window.handleAction(source, action).value_or(false));
   QVERIFY(window.isHidden());
 
   action = {};
   action.tag = GHOSTTY_ACTION_NEW_TAB;
-  QVERIFY(window.handleAction(source, action));
+  QVERIFY(window.handleAction(source, action).value_or(false));
   QCOMPARE(tabBar->count(), 2);
+
+  action = {};
+  action.tag = GHOSTTY_ACTION_GOTO_TAB;
+  action.action.goto_tab = static_cast<ghostty_action_goto_tab_e>(1);
+  QVERIFY(window.handleAction(source, action).value_or(false));
+  QCOMPARE(tabBar->currentIndex(), 0);
+
+  action.action.goto_tab = static_cast<ghostty_action_goto_tab_e>(9);
+  QVERIFY(window.handleAction(source, action).value_or(false));
+  QCOMPARE(tabBar->currentIndex(), 1);
+
+  const std::optional<bool> tabNoOp = window.handleAction(source, action);
+  QVERIFY(tabNoOp.has_value());
+  QVERIFY(!tabNoOp.value());
 
   action = {};
   action.tag = GHOSTTY_ACTION_NEW_SPLIT;
   action.action.new_split = GHOSTTY_SPLIT_DIRECTION_RIGHT;
-  QVERIFY(window.handleAction(source, action));
+  QVERIFY(window.handleAction(source, action).value_or(false));
   QCOMPARE(firstTab->terminals().size(), 2);
 
   action = {};
   action.tag = GHOSTTY_ACTION_GOTO_SPLIT;
   action.action.goto_split = GHOSTTY_GOTO_SPLIT_NEXT;
-  QVERIFY(window.handleAction(source, action));
+  QVERIFY(window.handleAction(source, action).value_or(false));
 
   action = {};
   action.tag = GHOSTTY_ACTION_RESIZE_SPLIT;
   action.action.resize_split = {10, GHOSTTY_RESIZE_SPLIT_RIGHT};
-  QVERIFY(window.handleAction(source, action));
+  QVERIFY(window.handleAction(source, action).value_or(false));
 
   action = {};
   action.tag = GHOSTTY_ACTION_EQUALIZE_SPLITS;
-  QVERIFY(window.handleAction(source, action));
+  QVERIFY(window.handleAction(source, action).value_or(false));
 
   action = {};
   action.tag = GHOSTTY_ACTION_TOGGLE_SPLIT_ZOOM;
-  QVERIFY(window.handleAction(source, action));
-  QVERIFY(window.handleAction(source, action));
+  QVERIFY(window.handleAction(source, action).value_or(false));
+  QVERIFY(window.handleAction(source, action).value_or(false));
 
   action = {};
   action.tag = GHOSTTY_ACTION_MOVE_TAB;
   action.action.move_tab.amount = 1;
-  QVERIFY(window.handleAction(source, action));
+  QVERIFY(window.handleAction(source, action).value_or(false));
   QCOMPARE(stack->indexOf(firstTab), 1);
   QCOMPARE(tabBar->count(), 2);
+
+  action = {};
+  action.tag = GHOSTTY_ACTION_RENDER;
+  QVERIFY(!window.handleAction(source, action).has_value());
 }
 
 int main(int argc, char** argv) {

@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 
 namespace {
 ghostty_config_t loadConfig() {
@@ -395,17 +396,22 @@ void GhosttyApp::closeSurfaceCallback(void* userdata, bool processAlive) {
 bool GhosttyApp::handleAction(ghostty_target_s target,
                               ghostty_action_s action) {
   TerminalWidget* widget = widgetForTarget(target);
-  if (widget != nullptr && widget->handleAction(action)) {
-    return true;
+  if (widget != nullptr) {
+    const std::optional<bool> result = widget->handleAction(action);
+    if (result.has_value()) {
+      return result.value();
+    }
   }
 
   MainWindow* window =
       widget != nullptr
           ? qobject_cast<MainWindow*>(widget->window())
           : qobject_cast<MainWindow*>(QApplication::activeWindow());
-  if (target.tag == GHOSTTY_TARGET_SURFACE && window != nullptr &&
-      window->handleAction(widget, action)) {
-    return true;
+  if (target.tag == GHOSTTY_TARGET_SURFACE && window != nullptr) {
+    const std::optional<bool> result = window->handleAction(widget, action);
+    if (result.has_value()) {
+      return result.value();
+    }
   }
 
   switch (action.tag) {
@@ -484,7 +490,7 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
     case GHOSTTY_ACTION_RENDER:
       for (TerminalWidget* surface : m_surfaces) {
         if (surface != nullptr) {
-          surface->handleAction(action);
+          (void)surface->handleAction(action);
         }
       }
       return true;

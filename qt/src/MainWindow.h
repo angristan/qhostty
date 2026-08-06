@@ -5,6 +5,8 @@
 
 #include <ghostty.h>
 
+#include <optional>
+
 class CommandPalette;
 class GhosttyApp;
 class QCloseEvent;
@@ -32,7 +34,9 @@ class MainWindow final : public QMainWindow {
 
   int addTab(const ghostty_surface_config_s* baseConfig = nullptr);
   int adoptTab(TerminalTab* tab, const QString& title);
-  bool handleAction(TerminalWidget* source, const ghostty_action_s& action);
+  [[nodiscard]] std::optional<bool> handleAction(
+      TerminalWidget* source,
+      const ghostty_action_s& action);
   [[nodiscard]] TerminalTab* currentTab() const;
   [[nodiscard]] bool canClose() const;
   [[nodiscard]] bool isQuickTerminal() const {

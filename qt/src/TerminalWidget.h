@@ -7,6 +7,8 @@
 
 #include <ghostty.h>
 
+#include <optional>
+
 class QFocusEvent;
 class QFrame;
 class QHideEvent;
@@ -53,7 +55,8 @@ class TerminalWidget final : public QOpenGLWidget {
                       size_t count,
                       bool confirm);
   void requestClose(bool processAlive);
-  bool handleAction(const ghostty_action_s& action);
+  [[nodiscard]] std::optional<bool> handleAction(
+      const ghostty_action_s& action);
   bool runBindingAction(const QString& action);
 
  signals:
