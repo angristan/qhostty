@@ -50,6 +50,14 @@ TerminalWidget::TerminalWidget(GhosttyApp* app,
     m_workingDirectoryUtf8 = m_workingDirectory.toUtf8();
     m_config.working_directory = nullptr;
   }
+  if (m_config.command != nullptr) {
+    m_commandUtf8 = QByteArray(m_config.command);
+    m_config.command = nullptr;
+  }
+  if (m_config.initial_input != nullptr) {
+    m_initialInputUtf8 = QByteArray(m_config.initial_input);
+    m_config.initial_input = nullptr;
+  }
 
   m_searchFrame = new QFrame(this);
   m_searchFrame->setObjectName(QStringLiteral("qhostty-search"));
@@ -580,6 +588,10 @@ void TerminalWidget::createSurface() {
   m_config.working_directory = m_workingDirectoryUtf8.isEmpty()
                                    ? nullptr
                                    : m_workingDirectoryUtf8.constData();
+  m_config.command =
+      m_commandUtf8.isEmpty() ? nullptr : m_commandUtf8.constData();
+  m_config.initial_input =
+      m_initialInputUtf8.isEmpty() ? nullptr : m_initialInputUtf8.constData();
 
   m_surface = ghostty_surface_new(m_app->handle(), &m_config);
   m_contextRealized = m_surface != nullptr;

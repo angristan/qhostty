@@ -1,10 +1,13 @@
 #include "GhosttyApp.h"
-#include "MainWindow.h"
+#include "SingleInstance.h"
 
 #include <QApplication>
 #include <QColorSpace>
+#include <QDebug>
+#include <QDir>
 #include <QIcon>
 #include <QOpenGLContext>
+#include <QStandardPaths>
 #include <QSurfaceFormat>
 
 #include <cstdlib>
@@ -39,11 +42,32 @@ int main(int argc, char** argv) {
   QApplication::setWindowIcon(
       QIcon::fromTheme(QStringLiteral("io.github.angristan.qhostty")));
 
+  QString runtimeDirectory =
+      QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+  if (runtimeDirectory.isEmpty()) {
+    runtimeDirectory = QDir::tempPath();
+  }
+  SingleInstance instance(
+      QDir(runtimeDirectory)
+          .filePath(QStringLiteral("io.github.angristan.qhostty.v1")));
+  const SingleInstance::StartResult instanceResult =
+      instance.start(application.arguments(), QDir::currentPath());
+  if (instanceResult == SingleInstance::StartResult::Forwarded) {
+    return EXIT_SUCCESS;
+  }
+  if (instanceResult == SingleInstance::StartResult::Failed) {
+    qCritical().noquote() << "Unable to start Qhostty:"
+                          << instance.errorString();
+    return EXIT_FAILURE;
+  }
+
   GhosttyApp ghostty;
   if (!ghostty.initialize()) {
     return EXIT_FAILURE;
   }
 
+  QObject::connect(&instance, &SingleInstance::activationRequested, &ghostty,
+                   &GhosttyApp::activate);
   ghostty.createWindow();
 
   return application.exec();

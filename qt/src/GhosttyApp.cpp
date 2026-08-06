@@ -10,6 +10,7 @@
 #include <QDBusPendingCall>
 #include <QDebug>
 #include <QDesktopServices>
+#include <QDir>
 #include <QInputMethod>
 #include <QMetaObject>
 #include <QPalette>
@@ -39,6 +40,81 @@ void logDiagnostics(ghostty_config_t config) {
         ghostty_config_get_diagnostic(config, index);
     qWarning().noquote() << "Ghostty config:" << diagnostic.message;
   }
+}
+
+struct ActivationOptions {
+  QString workingDirectory;
+  QString command;
+  QString initialInput;
+  QString title;
+  float fontSize = 0;
+  bool waitAfterCommand = false;
+};
+
+QString shellQuote(QString value) {
+  value.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+  return QLatin1Char('\'') + value + QLatin1Char('\'');
+}
+
+ActivationOptions parseActivation(const QStringList& arguments,
+                                  const QString& senderDirectory) {
+  ActivationOptions result;
+  result.workingDirectory = QDir(senderDirectory).absolutePath();
+  QStringList commandArguments;
+
+  for (qsizetype index = 1; index < arguments.size(); ++index) {
+    const QString argument = arguments.at(index);
+    if (argument == QStringLiteral("-e") || argument == QStringLiteral("--")) {
+      commandArguments = arguments.mid(index + 1);
+      break;
+    }
+
+    auto takeValue = [&](const QString& name) -> QString {
+      const QString prefix = name + QLatin1Char('=');
+      if (argument.startsWith(prefix)) {
+        return argument.mid(prefix.size());
+      }
+      if (argument == name && index + 1 < arguments.size()) {
+        return arguments.at(++index);
+      }
+      return {};
+    };
+
+    if (const QString value = takeValue(QStringLiteral("--working-directory"));
+        !value.isEmpty()) {
+      result.workingDirectory = QDir(senderDirectory).absoluteFilePath(value);
+    } else if (const QString value = takeValue(QStringLiteral("--title"));
+               !value.isEmpty()) {
+      result.title = value;
+    } else if (const QString value = takeValue(QStringLiteral("--font-size"));
+               !value.isEmpty()) {
+      bool valid = false;
+      const float fontSize = value.toFloat(&valid);
+      if (valid && fontSize > 0) {
+        result.fontSize = fontSize;
+      }
+    } else if (const QString value = takeValue(QStringLiteral("--command"));
+               !value.isEmpty()) {
+      result.command = value;
+    } else if (const QString value =
+                   takeValue(QStringLiteral("--initial-input"));
+               !value.isEmpty()) {
+      result.initialInput = value;
+    } else if (argument == QStringLiteral("--wait-after-command")) {
+      result.waitAfterCommand = true;
+    }
+  }
+
+  if (!commandArguments.isEmpty()) {
+    QStringList quoted;
+    quoted.reserve(commandArguments.size());
+    for (const QString& argument : commandArguments) {
+      quoted.append(shellQuote(argument));
+    }
+    result.command = quoted.join(QLatin1Char(' '));
+    result.waitAfterCommand = true;
+  }
+  return result;
 }
 }  // namespace
 
@@ -154,6 +230,32 @@ MainWindow* GhosttyApp::createWindow(
     const ghostty_surface_config_s* baseConfig) {
   auto* window = new MainWindow(this, nullptr, baseConfig);
   window->show();
+  return window;
+}
+
+MainWindow* GhosttyApp::activate(const QStringList& arguments,
+                                 const QString& workingDirectory) {
+  const ActivationOptions options =
+      parseActivation(arguments, workingDirectory);
+  const QByteArray directory = options.workingDirectory.toUtf8();
+  const QByteArray command = options.command.toUtf8();
+  const QByteArray input = options.initialInput.toUtf8();
+
+  ghostty_surface_config_s config = ghostty_surface_config_new();
+  config.context = GHOSTTY_SURFACE_CONTEXT_WINDOW;
+  config.working_directory =
+      directory.isEmpty() ? nullptr : directory.constData();
+  config.command = command.isEmpty() ? nullptr : command.constData();
+  config.initial_input = input.isEmpty() ? nullptr : input.constData();
+  config.font_size = options.fontSize;
+  config.wait_after_command = options.waitAfterCommand;
+
+  MainWindow* window = createWindow(&config);
+  if (!options.title.isEmpty()) {
+    window->setWindowTitle(options.title);
+  }
+  window->raise();
+  window->activateWindow();
   return window;
 }
 

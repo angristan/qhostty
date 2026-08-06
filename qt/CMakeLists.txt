@@ -5,7 +5,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui Widgets OpenGL OpenGLWidgets)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui Network Widgets OpenGL OpenGLWidgets)
 
 include(cmake/Ghostty.cmake)
 
@@ -14,6 +14,8 @@ qt_add_library(qhostty_frontend STATIC
   src/GhosttyApp.h
   src/MainWindow.cpp
   src/MainWindow.h
+  src/SingleInstance.cpp
+  src/SingleInstance.h
   src/SplitAlgorithms.cpp
   src/SplitAlgorithms.h
   src/TerminalTab.cpp
@@ -30,6 +32,7 @@ target_link_libraries(qhostty_frontend PUBLIC
   Qt6::Core
   Qt6::DBus
   Qt6::Gui
+  Qt6::Network
   Qt6::Widgets
   Qt6::OpenGL
   Qt6::OpenGLWidgets
@@ -80,6 +83,22 @@ if(BUILD_TESTING)
   add_test(NAME qhostty_window_actions COMMAND qhostty_window_actions_test)
   set_tests_properties(qhostty_window_actions PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+  qt_add_executable(qhostty_single_instance_test
+    tests/tst_SingleInstance.cpp
+    src/SingleInstance.cpp
+    src/SingleInstance.h
+  )
+  target_include_directories(qhostty_single_instance_test PRIVATE src)
+  target_compile_features(qhostty_single_instance_test PRIVATE cxx_std_20)
+  target_compile_options(qhostty_single_instance_test PRIVATE
+    -Wall -Wextra -Wpedantic)
+  target_link_libraries(qhostty_single_instance_test PRIVATE
+    Qt6::Core
+    Qt6::Network
+    Qt6::Test
+  )
+  add_test(NAME qhostty_single_instance COMMAND qhostty_single_instance_test)
 endif()
 
 include(GNUInstallDirs)

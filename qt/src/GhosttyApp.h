@@ -3,6 +3,7 @@
 #include <QList>
 #include <QObject>
 #include <QSet>
+#include <QStringList>
 
 #include <atomic>
 
@@ -27,6 +28,8 @@ class GhosttyApp final : public QObject {
 
   MainWindow* createWindow(
       const ghostty_surface_config_s* baseConfig = nullptr);
+  MainWindow* activate(const QStringList& arguments,
+                       const QString& workingDirectory);
   void registerWindow(MainWindow* window);
   void unregisterWindow(MainWindow* window);
   void registerSurface(TerminalWidget* widget);

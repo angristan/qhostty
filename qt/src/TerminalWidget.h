@@ -108,6 +108,8 @@ class TerminalWidget final : public QOpenGLWidget {
   QString m_title;
   QString m_workingDirectory;
   QByteArray m_workingDirectoryUtf8;
+  QByteArray m_commandUtf8;
+  QByteArray m_initialInputUtf8;
   QSize m_cellSize;
   QFrame* m_searchFrame;
   QLineEdit* m_searchEdit;
