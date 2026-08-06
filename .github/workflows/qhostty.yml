@@ -32,8 +32,8 @@ jobs:
         uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4
         with:
           version: 6.8.3
-          archives: qtbase
           cache: true
+          cache-key-prefix: qhostty-qt
 
       - name: Install build dependencies
         run: |
