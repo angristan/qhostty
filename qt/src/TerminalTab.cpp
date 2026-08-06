@@ -138,11 +138,11 @@ bool TerminalTab::focusSplit(ghostty_action_goto_split_e direction) {
     return false;
   }
 
-  const int currentIndex = all.indexOf(m_active);
+  const qsizetype currentIndex = all.indexOf(m_active);
   if (direction == GHOSTTY_GOTO_SPLIT_PREVIOUS ||
       direction == GHOSTTY_GOTO_SPLIT_NEXT) {
-    const int delta = direction == GHOSTTY_GOTO_SPLIT_PREVIOUS ? -1 : 1;
-    const int index = (currentIndex + delta + all.size()) % all.size();
+    const qsizetype delta = direction == GHOSTTY_GOTO_SPLIT_PREVIOUS ? -1 : 1;
+    const qsizetype index = (currentIndex + delta + all.size()) % all.size();
     setActive(all.at(index));
     m_active->setFocus(Qt::ShortcutFocusReason);
     return true;
@@ -153,8 +153,8 @@ bool TerminalTab::focusSplit(ghostty_action_goto_split_e direction) {
   for (TerminalWidget* terminal : all) {
     centers.append(terminal->mapTo(this, terminal->rect().center()));
   }
-  const int next =
-      qhostty::directionalNeighbor(centers, currentIndex, direction);
+  const int next = qhostty::directionalNeighbor(
+      centers, static_cast<int>(currentIndex), direction);
   if (next < 0) {
     return false;
   }

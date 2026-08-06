@@ -278,8 +278,8 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
         return false;
       }
       const QList<MainWindow*>& windows = m_windows;
-      int index = windows.indexOf(window);
-      const int delta =
+      qsizetype index = windows.indexOf(window);
+      const qsizetype delta =
           action.action.goto_window == GHOSTTY_GOTO_WINDOW_PREVIOUS ? -1 : 1;
       index = (index + delta + windows.size()) % windows.size();
       windows.at(index)->show();
