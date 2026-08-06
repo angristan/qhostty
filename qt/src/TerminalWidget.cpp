@@ -673,11 +673,13 @@ void TerminalWidget::resizeEvent(QResizeEvent* event) {
 void TerminalWidget::keyPressEvent(QKeyEvent* event) {
   const ghostty_input_action_e action =
       event->isAutoRepeat() ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS;
-  if (sendKey(event, action)) {
+  const bool handled = sendKey(event, action);
+  if (handled || event->key() == Qt::Key_Tab ||
+      event->key() == Qt::Key_Backtab) {
     event->accept();
-  } else {
-    QOpenGLWidget::keyPressEvent(event);
+    return;
   }
+  QOpenGLWidget::keyPressEvent(event);
 }
 
 void TerminalWidget::keyReleaseEvent(QKeyEvent* event) {
