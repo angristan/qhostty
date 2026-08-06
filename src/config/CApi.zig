@@ -121,6 +121,34 @@ fn config_trigger_(
     return trigger.cval();
 }
 
+const GlobalKeybindCallback = *const fn (
+    ?*anyopaque,
+    inputpkg.Binding.Trigger.C,
+    [*]const u8,
+    usize,
+) callconv(.c) bool;
+
+export fn ghostty_config_enumerate_global_keybinds(
+    self: *Config,
+    userdata: ?*anyopaque,
+    callback: GlobalKeybindCallback,
+) void {
+    var action_buf: [4096]u8 = undefined;
+    var it = self.keybind.set.bindings.iterator();
+    while (it.next()) |entry| {
+        const leaf: inputpkg.Binding.Set.GenericLeaf = switch (entry.value_ptr.*) {
+            .leader => continue,
+            inline .leaf, .leaf_chained => |leaf| leaf.generic(),
+        };
+        if (!leaf.flags.global) continue;
+
+        const actions = leaf.actionsSlice();
+        if (actions.len != 1) continue;
+        const action = std.fmt.bufPrint(&action_buf, "{f}", .{actions[0]}) catch continue;
+        if (!callback(userdata, entry.key_ptr.*.cval(), action.ptr, action.len)) return;
+    }
+}
+
 export fn ghostty_config_diagnostics_count(self: *Config) u32 {
     return @intCast(self._diagnostics.items().len);
 }

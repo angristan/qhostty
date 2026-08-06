@@ -527,6 +527,12 @@ typedef struct {
   size_t len;
 } ghostty_config_command_list_s;
 
+typedef bool (*ghostty_config_global_keybind_cb)(
+    void*,
+    ghostty_input_trigger_s,
+    const char*,
+    uintptr_t);
+
 // config.Palette
 typedef struct {
   ghostty_config_color_s colors[256];
@@ -1101,6 +1107,10 @@ GHOSTTY_API ghostty_input_trigger_s ghostty_config_trigger(ghostty_config_t,
                                                               const char*,
                                                               uintptr_t);
 GHOSTTY_API bool ghostty_config_key_is_binding(ghostty_config_t, ghostty_input_key_s);
+GHOSTTY_API void ghostty_config_enumerate_global_keybinds(
+    ghostty_config_t,
+    void*,
+    ghostty_config_global_keybind_cb);
 GHOSTTY_API uint32_t ghostty_config_diagnostics_count(ghostty_config_t);
 GHOSTTY_API ghostty_diagnostic_s ghostty_config_get_diagnostic(ghostty_config_t, uint32_t);
 GHOSTTY_API ghostty_string_s ghostty_config_open_path(void);
