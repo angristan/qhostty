@@ -35,7 +35,7 @@ The Qt application will live in a separate `qt/` directory. It will link to Ghos
 
 The embedded runtime must gain a Linux OpenGL platform bridge. This bridge will provide the current OpenGL context, function loading, framebuffer target, redraw scheduling, and surface lifecycle callbacks.
 
-## Milestone 0: Project foundation
+## Milestone 0: Project foundation (complete)
 
 - Add a Qt 6 and CMake application in `qt/`.
 - Link the Qt application to the Ghostty library built by Zig.
@@ -45,7 +45,7 @@ The embedded runtime must gain a Linux OpenGL platform bridge. This bridge will 
 
 **Complete when:** an empty native Qt window starts and links to Ghostty without GTK or libadwaita.
 
-## Milestone 1: OpenGL proof of concept
+## Milestone 1: OpenGL proof of concept (complete)
 
 This is the main technical risk and must be solved before other frontend work.
 
@@ -60,7 +60,7 @@ This is the main technical risk and must be solved before other frontend work.
 
 **Complete when:** a shell renders correctly, resizes cleanly, and closes without OpenGL errors or leaks.
 
-## Milestone 2: Single-terminal input
+## Milestone 2: Single-terminal input (complete)
 
 - Translate Qt key events to Ghostty key events.
 - Support physical keys, modifiers, key repeats, and Ghostty keybindings.
@@ -72,7 +72,7 @@ This is the main technical risk and must be solved before other frontend work.
 
 **Complete when:** one Qhostty terminal is suitable for normal shell and editor use on Plasma Wayland.
 
-## Milestone 3: Windows and native tabs
+## Milestone 3: Windows and native tabs (complete)
 
 - Add Qt application, window, tab, and terminal-surface classes.
 - Use `QTabBar` with `QStackedWidget` for native tabs.
@@ -84,7 +84,7 @@ This is the main technical risk and must be solved before other frontend work.
 
 **Complete when:** Ghostty tab keybindings and tab actions work through native Qt tabs.
 
-## Milestone 4: Splits and overlays
+## Milestone 4: Splits and overlays (complete)
 
 - Represent split layouts with a small tree model backed by `QSplitter`.
 - Add split creation, focus, resize, equalize, zoom, and close actions.
@@ -94,7 +94,7 @@ This is the main technical risk and must be solved before other frontend work.
 
 **Complete when:** nested splits work without losing focus, sizing, or terminal state.
 
-## Milestone 5: KDE and desktop integration
+## Milestone 5: KDE and desktop integration (complete)
 
 - Follow the active Qt and KDE color scheme and style.
 - Add the desktop file, icon, application metadata, and MIME handling.
@@ -105,7 +105,7 @@ This is the main technical risk and must be solved before other frontend work.
 
 **Complete when:** Qhostty installs and behaves like a normal KDE application.
 
-## Milestone 6: Parity and release hardening
+## Milestone 6: Parity and release hardening (feature-complete)
 
 - Complete the remaining Ghostty actions used on Linux.
 - Add command palette and terminal inspector support.
@@ -119,14 +119,21 @@ This is the main technical risk and must be solved before other frontend work.
 
 ## Validation matrix
 
-- Plasma Wayland and Plasma X11
-- NVIDIA and Mesa OpenGL drivers
-- 100%, 150%, and 200% display scaling
-- ibus, fcitx, dead keys, and CJK input
+Validated in automated tests or local smoke tests:
+
+- Plasma Wayland and Plasma X11 startup
+- Mesa OpenGL rendering
+- 100% and fractional display scaling
 - Standard clipboard and primary selection
 - Mouse-reporting terminal applications
 - Tabs, nested splits, multiple windows, and detach operations
 - Config reloads, light/dark changes, and process exit handling
+
+Still needs broader hardware coverage:
+
+- NVIDIA OpenGL drivers
+- 200% multi-monitor scaling
+- ibus, fcitx, dead keys, and CJK input
 
 ## Upstream strategy
 
@@ -138,12 +145,6 @@ This is the main technical risk and must be solved before other frontend work.
 
 ## Initial release scope
 
-The first alpha needs:
+The implementation now includes the original alpha scope plus single-instance activation, Plasma quick terminal integration, supported global shortcuts, a native command palette, an OpenGL inspector, progress and scrollbar UI, and explicit routing for every Ghostty action tag.
 
-- Plasma Wayland support
-- One window with native tabs and splits
-- Ghostty rendering and configuration
-- Keyboard, IME, mouse, scroll, clipboard, and DPI support
-- Clean startup and shutdown
-
-Quick terminal, inspector, X11 support, and complete feature parity can follow after the first usable alpha.
+The first release still needs broader hardware validation and release artifact testing. Platform-specific unsupported actions are listed in [README.md](README.md).
