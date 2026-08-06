@@ -6,16 +6,23 @@
 #include <QClipboard>
 #include <QDesktopServices>
 #include <QFocusEvent>
+#include <QFrame>
 #include <QGuiApplication>
+#include <QHBoxLayout>
 #include <QHideEvent>
 #include <QInputMethodEvent>
 #include <QKeyEvent>
+#include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
+#include <QPushButton>
+#include <QResizeEvent>
 #include <QShowEvent>
+#include <QSignalBlocker>
 #include <QUrl>
 #include <QWheelEvent>
 #include <QWindow>
@@ -40,6 +47,47 @@ TerminalWidget::TerminalWidget(GhosttyApp* app,
     m_workingDirectoryUtf8 = m_workingDirectory.toUtf8();
     m_config.working_directory = nullptr;
   }
+
+  m_searchFrame = new QFrame(this);
+  m_searchFrame->setObjectName(QStringLiteral("qhostty-search"));
+  m_searchFrame->setFrameShape(QFrame::StyledPanel);
+  auto* searchLayout = new QHBoxLayout(m_searchFrame);
+  searchLayout->setContentsMargins(6, 4, 6, 4);
+  searchLayout->setSpacing(4);
+  m_searchEdit = new QLineEdit(m_searchFrame);
+  m_searchEdit->setPlaceholderText(tr("Search"));
+  m_searchEdit->installEventFilter(this);
+  m_searchCount = new QLabel(m_searchFrame);
+  auto* previous = new QPushButton(tr("Previous"), m_searchFrame);
+  auto* next = new QPushButton(tr("Next"), m_searchFrame);
+  auto* close = new QPushButton(tr("Close"), m_searchFrame);
+  searchLayout->addWidget(m_searchEdit);
+  searchLayout->addWidget(m_searchCount);
+  searchLayout->addWidget(previous);
+  searchLayout->addWidget(next);
+  searchLayout->addWidget(close);
+  m_searchFrame->hide();
+
+  connect(m_searchEdit, &QLineEdit::textChanged, this,
+          [this](const QString& needle) {
+            runBindingAction(QStringLiteral("search:") + needle);
+          });
+  connect(previous, &QPushButton::clicked, this, [this]() {
+    runBindingAction(QStringLiteral("navigate_search:previous"));
+  });
+  connect(next, &QPushButton::clicked, this, [this]() {
+    runBindingAction(QStringLiteral("navigate_search:next"));
+  });
+  connect(close, &QPushButton::clicked, this,
+          [this]() { runBindingAction(QStringLiteral("end_search")); });
+
+  m_statusOverlay = new QLabel(this);
+  m_statusOverlay->setObjectName(QStringLiteral("qhostty-status"));
+  m_statusOverlay->setFrameShape(QFrame::StyledPanel);
+  m_statusOverlay->setAlignment(Qt::AlignCenter);
+  m_statusOverlay->setWordWrap(true);
+  m_statusOverlay->hide();
+
   m_app->registerSurface(this);
 }
 
@@ -218,10 +266,16 @@ bool TerminalWidget::handleAction(const ghostty_action_s& action) {
       setMouseVisible(action.action.mouse_visibility == GHOSTTY_MOUSE_VISIBLE);
       return true;
     case GHOSTTY_ACTION_PRESENT_TERMINAL:
+      if (window() != nullptr) {
+        window()->show();
+        window()->raise();
+        window()->activateWindow();
+      }
       setFocus(Qt::OtherFocusReason);
       return true;
     case GHOSTTY_ACTION_RING_BELL:
       QApplication::beep();
+      QApplication::alert(window());
       emit bellRang();
       return true;
     case GHOSTTY_ACTION_OPEN_URL: {
@@ -232,9 +286,47 @@ bool TerminalWidget::handleAction(const ghostty_action_s& action) {
     case GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD:
       QGuiApplication::clipboard()->setText(m_title);
       return true;
+    case GHOSTTY_ACTION_MOUSE_OVER_LINK: {
+      const auto& link = action.action.mouse_over_link;
+      setToolTip(
+          link.url == nullptr
+              ? QString()
+              : QString::fromUtf8(link.url, static_cast<qsizetype>(link.len)));
+      return true;
+    }
     case GHOSTTY_ACTION_RENDERER_HEALTH:
-      setEnabled(action.action.renderer_health ==
-                 GHOSTTY_RENDERER_HEALTH_HEALTHY);
+      if (action.action.renderer_health == GHOSTTY_RENDERER_HEALTH_HEALTHY) {
+        m_statusOverlay->hide();
+      } else {
+        m_statusOverlay->setText(
+            tr("The terminal renderer stopped unexpectedly."));
+        m_statusOverlay->show();
+        layoutOverlays();
+      }
+      return true;
+    case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
+      m_statusOverlay->setText(tr("The shell exited with status %1.")
+                                   .arg(action.action.child_exited.exit_code));
+      m_statusOverlay->show();
+      layoutOverlays();
+      return true;
+    case GHOSTTY_ACTION_START_SEARCH:
+      showSearch(action.action.start_search.needle);
+      return true;
+    case GHOSTTY_ACTION_END_SEARCH:
+      m_searchFrame->hide();
+      setFocus(Qt::OtherFocusReason);
+      return true;
+    case GHOSTTY_ACTION_SEARCH_TOTAL:
+      m_searchTotal = action.action.search_total.total;
+      updateSearchCount();
+      return true;
+    case GHOSTTY_ACTION_SEARCH_SELECTED:
+      m_searchSelected = action.action.search_selected.selected;
+      updateSearchCount();
+      return true;
+    case GHOSTTY_ACTION_SHOW_ON_SCREEN_KEYBOARD:
+      QGuiApplication::inputMethod()->show();
       return true;
     case GHOSTTY_ACTION_SELECTION_CHANGED:
     case GHOSTTY_ACTION_COLOR_CHANGE:
@@ -276,6 +368,11 @@ void TerminalWidget::paintGL() {
 
 void TerminalWidget::resizeGL(int, int) {
   syncSurfaceMetrics();
+}
+
+void TerminalWidget::resizeEvent(QResizeEvent* event) {
+  QOpenGLWidget::resizeEvent(event);
+  layoutOverlays();
 }
 
 void TerminalWidget::keyPressEvent(QKeyEvent* event) {
@@ -402,6 +499,23 @@ bool TerminalWidget::event(QEvent* event) {
     syncSurfaceMetrics();
   }
   return QOpenGLWidget::event(event);
+}
+
+bool TerminalWidget::eventFilter(QObject* watched, QEvent* event) {
+  if (watched == m_searchEdit && event->type() == QEvent::KeyPress) {
+    auto* key = static_cast<QKeyEvent*>(event);
+    if (key->key() == Qt::Key_Escape) {
+      runBindingAction(QStringLiteral("end_search"));
+      return true;
+    }
+    if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+      runBindingAction(key->modifiers().testFlag(Qt::ShiftModifier)
+                           ? QStringLiteral("navigate_search:previous")
+                           : QStringLiteral("navigate_search:next"));
+      return true;
+    }
+  }
+  return QOpenGLWidget::eventFilter(watched, event);
 }
 
 void TerminalWidget::cleanupContext() {
@@ -546,6 +660,60 @@ void TerminalWidget::setMouseVisible(bool visible) {
     unsetCursor();
   } else {
     setCursor(Qt::BlankCursor);
+  }
+}
+
+bool TerminalWidget::runBindingAction(const QString& action) {
+  if (m_surface == nullptr) {
+    return false;
+  }
+  const QByteArray bytes = action.toUtf8();
+  return ghostty_surface_binding_action(m_surface, bytes.constData(),
+                                        static_cast<uintptr_t>(bytes.size()));
+}
+
+void TerminalWidget::showSearch(const char* needle) {
+  if (needle != nullptr && *needle != '\0') {
+    const QSignalBlocker blocker(m_searchEdit);
+    m_searchEdit->setText(QString::fromUtf8(needle));
+  }
+  m_searchTotal = -1;
+  m_searchSelected = -1;
+  updateSearchCount();
+  m_searchFrame->show();
+  m_searchFrame->raise();
+  layoutOverlays();
+  m_searchEdit->setFocus(Qt::ShortcutFocusReason);
+  m_searchEdit->selectAll();
+}
+
+void TerminalWidget::updateSearchCount() {
+  if (m_searchSelected >= 0 && m_searchTotal >= 0) {
+    m_searchCount->setText(
+        tr("%1/%2").arg(m_searchSelected + 1).arg(m_searchTotal));
+  } else if (m_searchTotal >= 0) {
+    m_searchCount->setText(tr("–/%1").arg(m_searchTotal));
+  } else {
+    m_searchCount->clear();
+  }
+  layoutOverlays();
+}
+
+void TerminalWidget::layoutOverlays() {
+  if (m_searchFrame != nullptr) {
+    const QSize hint = m_searchFrame->sizeHint().boundedTo(
+        QSize(std::max(0, width() - 16), std::max(0, height() - 16)));
+    m_searchFrame->setGeometry(std::max(8, width() - hint.width() - 8), 8,
+                               hint.width(), hint.height());
+  }
+  if (m_statusOverlay != nullptr) {
+    const int overlayWidth = std::min(420, std::max(0, width() - 32));
+    const QSize hint =
+        m_statusOverlay->sizeHint().boundedTo(QSize(overlayWidth, height()));
+    m_statusOverlay->setGeometry((width() - overlayWidth) / 2,
+                                 (height() - hint.height()) / 2, overlayWidth,
+                                 hint.height());
+    m_statusOverlay->raise();
   }
 }
 

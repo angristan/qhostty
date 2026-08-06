@@ -17,10 +17,12 @@ class MainWindow final : public QMainWindow {
  public:
   explicit MainWindow(GhosttyApp* app,
                       QWidget* parent = nullptr,
-                      const ghostty_surface_config_s* baseConfig = nullptr);
+                      const ghostty_surface_config_s* baseConfig = nullptr,
+                      bool createInitialTab = true);
   ~MainWindow() override;
 
   int addTab(const ghostty_surface_config_s* baseConfig = nullptr);
+  int adoptTab(TerminalTab* tab, const QString& title);
   bool handleAction(TerminalWidget* source, const ghostty_action_s& action);
   [[nodiscard]] TerminalTab* currentTab() const;
 
@@ -30,6 +32,8 @@ class MainWindow final : public QMainWindow {
  private:
   TerminalTab* tabFor(TerminalWidget* terminal) const;
   void closeTab(int index);
+  void detachTab(int index);
+  void connectTab(TerminalTab* tab);
   void updateTabTitle(TerminalTab* tab, const QString& title);
   bool selectTab(int value);
 

@@ -6,6 +6,7 @@
 
 #include <QCloseEvent>
 #include <QInputDialog>
+#include <QMenu>
 #include <QStackedWidget>
 #include <QTabBar>
 #include <QVBoxLayout>
@@ -14,7 +15,8 @@
 
 MainWindow::MainWindow(GhosttyApp* app,
                        QWidget* parent,
-                       const ghostty_surface_config_s* baseConfig)
+                       const ghostty_surface_config_s* baseConfig,
+                       bool createInitialTab)
     : QMainWindow(parent),
       m_app(app),
       m_tabBar(new QTabBar(this)),
@@ -29,6 +31,7 @@ MainWindow::MainWindow(GhosttyApp* app,
   m_tabBar->setTabsClosable(true);
   m_tabBar->setExpanding(false);
   m_tabBar->setElideMode(Qt::ElideRight);
+  m_tabBar->setContextMenuPolicy(Qt::CustomContextMenu);
 
   auto* central = new QWidget(this);
   auto* layout = new QVBoxLayout(central);
@@ -57,9 +60,23 @@ MainWindow::MainWindow(GhosttyApp* app,
     m_stack->insertWidget(to, page);
     m_stack->setCurrentIndex(to);
   });
+  connect(m_tabBar, &QTabBar::customContextMenuRequested, this,
+          [this](const QPoint& position) {
+            const int index = m_tabBar->tabAt(position);
+            if (index < 0) {
+              return;
+            }
+            QMenu menu(this);
+            QAction* detach = menu.addAction(tr("Detach Tab"));
+            if (menu.exec(m_tabBar->mapToGlobal(position)) == detach) {
+              detachTab(index);
+            }
+          });
 
   m_app->registerWindow(this);
-  addTab(baseConfig);
+  if (createInitialTab) {
+    addTab(baseConfig);
+  }
 }
 
 MainWindow::~MainWindow() {
@@ -68,14 +85,18 @@ MainWindow::~MainWindow() {
 
 int MainWindow::addTab(const ghostty_surface_config_s* baseConfig) {
   auto* tab = new TerminalTab(m_app, m_stack, baseConfig);
-  const int index = m_stack->addWidget(tab);
-  m_tabBar->insertTab(index, tr("Terminal"));
-  m_tabBar->setCurrentIndex(index);
+  return adoptTab(tab, tr("Terminal"));
+}
 
-  connect(tab, &TerminalTab::titleChanged, this,
-          [this, tab](const QString& title) { updateTabTitle(tab, title); });
-  connect(tab, &TerminalTab::closeRequested, this,
-          [this](TerminalTab* page) { closeTab(m_stack->indexOf(page)); });
+int MainWindow::adoptTab(TerminalTab* tab, const QString& title) {
+  if (tab == nullptr) {
+    return -1;
+  }
+  tab->setParent(m_stack);
+  const int index = m_stack->addWidget(tab);
+  m_tabBar->insertTab(index, title);
+  m_tabBar->setCurrentIndex(index);
+  connectTab(tab);
   return index;
 }
 
@@ -149,6 +170,33 @@ bool MainWindow::handleAction(TerminalWidget* source,
     case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
       isFullScreen() ? showNormal() : showFullScreen();
       return true;
+    case GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS: {
+      const bool frameless = windowFlags().testFlag(Qt::FramelessWindowHint);
+      setWindowFlag(Qt::FramelessWindowHint, !frameless);
+      show();
+      return true;
+    }
+    case GHOSTTY_ACTION_TOGGLE_VISIBILITY:
+      if (isVisible()) {
+        hide();
+      } else {
+        show();
+        raise();
+        activateWindow();
+      }
+      return true;
+    case GHOSTTY_ACTION_FLOAT_WINDOW: {
+      const auto mode = action.action.float_window;
+      const bool current = windowFlags().testFlag(Qt::WindowStaysOnTopHint);
+      const bool enabled = mode == GHOSTTY_FLOAT_WINDOW_TOGGLE
+                               ? !current
+                               : mode == GHOSTTY_FLOAT_WINDOW_ON;
+      setWindowFlag(Qt::WindowStaysOnTopHint, enabled);
+      show();
+      return true;
+    }
+    case GHOSTTY_ACTION_TOGGLE_BACKGROUND_OPACITY:
+      return true;
     case GHOSTTY_ACTION_TOGGLE_TAB_OVERVIEW:
       m_tabBar->setVisible(!m_tabBar->isVisible());
       return true;
@@ -220,6 +268,37 @@ void MainWindow::closeTab(int index) {
   if (m_tabBar->count() == 0) {
     close();
   }
+}
+
+void MainWindow::detachTab(int index) {
+  if (index < 0 || index >= m_stack->count()) {
+    return;
+  }
+
+  auto* tab = qobject_cast<TerminalTab*>(m_stack->widget(index));
+  if (tab == nullptr) {
+    return;
+  }
+  const QString title = m_tabBar->tabText(index);
+  m_stack->removeWidget(tab);
+  m_tabBar->removeTab(index);
+  tab->setParent(nullptr);
+
+  auto* detached = new MainWindow(m_app, nullptr, nullptr, false);
+  detached->adoptTab(tab, title);
+  detached->resize(size());
+  detached->show();
+  if (m_tabBar->count() == 0) {
+    close();
+  }
+}
+
+void MainWindow::connectTab(TerminalTab* tab) {
+  disconnect(tab, nullptr, this, nullptr);
+  connect(tab, &TerminalTab::titleChanged, this,
+          [this, tab](const QString& title) { updateTabTitle(tab, title); });
+  connect(tab, &TerminalTab::closeRequested, this,
+          [this](TerminalTab* page) { closeTab(m_stack->indexOf(page)); });
 }
 
 void MainWindow::updateTabTitle(TerminalTab* tab, const QString& title) {

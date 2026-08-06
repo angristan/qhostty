@@ -6,10 +6,14 @@
 #include <ghostty.h>
 
 class QFocusEvent;
+class QFrame;
 class QHideEvent;
 class QInputMethodEvent;
 class QKeyEvent;
+class QLabel;
+class QLineEdit;
 class QMouseEvent;
+class QResizeEvent;
 class QShowEvent;
 class QWheelEvent;
 class GhosttyApp;
@@ -52,6 +56,7 @@ class TerminalWidget final : public QOpenGLWidget {
   void initializeGL() override;
   void paintGL() override;
   void resizeGL(int width, int height) override;
+  void resizeEvent(QResizeEvent* event) override;
 
   void keyPressEvent(QKeyEvent* event) override;
   void keyReleaseEvent(QKeyEvent* event) override;
@@ -67,6 +72,7 @@ class TerminalWidget final : public QOpenGLWidget {
   void showEvent(QShowEvent* event) override;
   void hideEvent(QHideEvent* event) override;
   bool event(QEvent* event) override;
+  bool eventFilter(QObject* watched, QEvent* event) override;
 
  private slots:
   void cleanupContext();
@@ -83,6 +89,10 @@ class TerminalWidget final : public QOpenGLWidget {
                          Qt::KeyboardModifiers modifiers);
   void setMouseShape(ghostty_action_mouse_shape_e shape);
   void setMouseVisible(bool visible);
+  bool runBindingAction(const QString& action);
+  void showSearch(const char* needle);
+  void updateSearchCount();
+  void layoutOverlays();
 
   static ghostty_input_mods_e modifiers(Qt::KeyboardModifiers modifiers);
   static ghostty_input_mouse_button_e mouseButton(Qt::MouseButton button);
@@ -96,4 +106,10 @@ class TerminalWidget final : public QOpenGLWidget {
   QString m_workingDirectory;
   QByteArray m_workingDirectoryUtf8;
   QSize m_cellSize;
+  QFrame* m_searchFrame;
+  QLineEdit* m_searchEdit;
+  QLabel* m_searchCount;
+  QLabel* m_statusOverlay;
+  qsizetype m_searchTotal = -1;
+  qsizetype m_searchSelected = -1;
 };
