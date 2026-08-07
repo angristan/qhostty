@@ -30,6 +30,14 @@ Qhostty currently provides:
 - Command-finished notifications, desktop notifications, URLs, terminal export, and close confirmation
 - Plasma launcher metadata, AppStream metadata, icons, and a Dolphin service action
 
+## What Qt replaces
+
+GTK4 becomes Qt 6 Widgets: `QOpenGLWidget` for the terminal surface, `QSplitter` for splits, `QTabBar` for tabs, `QMessageBox` for dialogs.
+
+libadwaita is dropped rather than reimplemented. Its widgets become plain Qt ones, and its styling role falls to the desktop's own Qt style, which is Breeze under Plasma. That is why Qhostty looks native on KDE without depending on anything from KDE.
+
+The optional KDE Frameworks packages cover only what Qt has no portable API for: quick-terminal placement and layering (LayerShellQt), the quick-terminal slide effect and X11 window state (KF6WindowSystem), and global shortcuts (KF6GlobalAccel). Kirigami is not used.
+
 ## Build
 
 Requirements: Zig 0.16, CMake 3.25 or newer, Ninja, Qt 6.5 or newer with Core, DBus, Gui, Network, Widgets, OpenGL, and OpenGLWidgets, Fontconfig, a C++20 compiler, and OpenGL 4.3.
