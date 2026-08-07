@@ -16,6 +16,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cstring>
 
 MainWindow::MainWindow(GhosttyApp* app,
                        QWidget* parent,
@@ -38,6 +39,7 @@ MainWindow::MainWindow(GhosttyApp* app,
   m_tabBar->setExpanding(false);
   m_tabBar->setElideMode(Qt::ElideRight);
   m_tabBar->setContextMenuPolicy(Qt::CustomContextMenu);
+  applyConfig(m_app->config());
 
   auto* central = new QWidget(this);
   auto* layout = new QVBoxLayout(central);
@@ -91,6 +93,26 @@ MainWindow::~MainWindow() {
   m_app->unregisterWindow(this);
 }
 
+void MainWindow::applyConfig(ghostty_config_t config) {
+  const char* value = nullptr;
+  if (config != nullptr &&
+      ghostty_config_get(config, static_cast<void*>(&value),
+                         "window-show-tab-bar",
+                         std::strlen("window-show-tab-bar")) &&
+      value != nullptr) {
+    if (std::strcmp(value, "always") == 0) {
+      m_tabBarVisibility = TabBarVisibility::Always;
+    } else if (std::strcmp(value, "never") == 0) {
+      m_tabBarVisibility = TabBarVisibility::Never;
+    } else {
+      m_tabBarVisibility = TabBarVisibility::Auto;
+    }
+  } else {
+    m_tabBarVisibility = TabBarVisibility::Auto;
+  }
+  updateTabBarVisibility();
+}
+
 int MainWindow::addTab(const ghostty_surface_config_s* baseConfig) {
   auto* tab = new TerminalTab(m_app, m_stack, baseConfig);
   return adoptTab(tab, tr("Terminal"));
@@ -104,6 +126,7 @@ int MainWindow::adoptTab(TerminalTab* tab, const QString& title) {
   const int index = m_stack->addWidget(tab);
   m_tabBar->insertTab(index, title);
   m_tabBar->setCurrentIndex(index);
+  updateTabBarVisibility();
   connectTab(tab);
   return index;
 }
@@ -351,6 +374,7 @@ void MainWindow::closeTab(int index) {
 
   m_stack->removeWidget(tab);
   m_tabBar->removeTab(index);
+  updateTabBarVisibility();
   tab->deleteLater();
   if (m_tabBar->count() == 0) {
     if (isQuickTerminal()) {
@@ -372,6 +396,7 @@ void MainWindow::detachTab(int index) {
   const QString title = m_tabBar->tabText(index);
   m_stack->removeWidget(tab);
   m_tabBar->removeTab(index);
+  updateTabBarVisibility();
   tab->setParent(nullptr);
 
   auto* detached = new MainWindow(m_app, nullptr, nullptr, false);
@@ -392,6 +417,7 @@ void MainWindow::connectTab(TerminalTab* tab) {
           [this, tab](const QString& title) { updateTabTitle(tab, title); });
   connect(tab, &TerminalTab::closeRequested, this,
           [this](TerminalTab* page) { closeTab(m_stack->indexOf(page)); });
+  connect(tab, &TerminalTab::configChanged, this, &MainWindow::applyConfig);
 }
 
 void MainWindow::updateTabTitle(TerminalTab* tab, const QString& title) {
@@ -404,6 +430,13 @@ void MainWindow::updateTabTitle(TerminalTab* tab, const QString& title) {
   if (index == m_tabBar->currentIndex()) {
     setWindowTitle(title);
   }
+}
+
+void MainWindow::updateTabBarVisibility() {
+  const bool visible =
+      m_tabBarVisibility == TabBarVisibility::Always ||
+      (m_tabBarVisibility == TabBarVisibility::Auto && m_tabBar->count() > 1);
+  m_tabBar->setVisible(visible);
 }
 
 void MainWindow::toggleCommandPalette(TerminalWidget* source) {

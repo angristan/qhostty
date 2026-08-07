@@ -45,6 +45,7 @@ class MainWindow final : public QMainWindow {
   void setQuickTerminalAutohide(bool enabled) {
     m_quickTerminalAutohide = enabled;
   }
+  void applyConfig(ghostty_config_t config);
   void closeConfirmed();
 
  protected:
@@ -52,11 +53,18 @@ class MainWindow final : public QMainWindow {
   void closeEvent(QCloseEvent* event) override;
 
  private:
+  enum class TabBarVisibility {
+    Always,
+    Auto,
+    Never,
+  };
+
   TerminalTab* tabFor(TerminalWidget* terminal) const;
   void closeTab(int index);
   void detachTab(int index);
   void connectTab(TerminalTab* tab);
   void updateTabTitle(TerminalTab* tab, const QString& title);
+  void updateTabBarVisibility();
   bool selectTab(int value);
   void toggleCommandPalette(TerminalWidget* source);
 
@@ -64,6 +72,7 @@ class MainWindow final : public QMainWindow {
   QTabBar* m_tabBar;
   QStackedWidget* m_stack;
   Role m_role;
+  TabBarVisibility m_tabBarVisibility = TabBarVisibility::Auto;
   QPointer<CommandPalette> m_commandPalette;
   bool m_quickTerminalAutohide = false;
 };

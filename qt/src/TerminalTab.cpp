@@ -237,6 +237,8 @@ void TerminalTab::connectTerminal(TerminalWidget* terminal) {
           [this](const QString& title) { setTitleOverride(title); });
   connect(terminal, &TerminalWidget::closeRequested, this,
           [this](TerminalWidget* surface) { closeSurface(surface); });
+  connect(terminal, &TerminalWidget::configChanged, this,
+          &TerminalTab::configChanged);
 }
 
 void TerminalTab::setActive(TerminalWidget* terminal) {

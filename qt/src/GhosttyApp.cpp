@@ -531,6 +531,11 @@ bool GhosttyApp::handleAction(ghostty_target_s target,
       if (m_globalShortcuts != nullptr) {
         m_globalShortcuts->refresh(m_config);
       }
+      for (MainWindow* candidate : m_windows) {
+        if (candidate != nullptr) {
+          candidate->applyConfig(m_config);
+        }
+      }
       if (m_quickTerminal != nullptr && m_quickTerminal->isVisible()) {
         showQuickTerminal(m_quickTerminal,
                           QuickTerminalSettings::fromConfig(m_config));

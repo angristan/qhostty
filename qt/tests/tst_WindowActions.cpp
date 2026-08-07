@@ -54,6 +54,23 @@ QStringList bindingActions(const QMenu* menu) {
   }
   return result;
 }
+
+ghostty_config_t configFromText(const QByteArray& contents) {
+  QTemporaryFile file;
+  if (!file.open() || file.write(contents) != contents.size() ||
+      !file.flush()) {
+    return nullptr;
+  }
+
+  ghostty_config_t config = ghostty_config_new();
+  if (config == nullptr) {
+    return nullptr;
+  }
+  const QByteArray path = file.fileName().toUtf8();
+  ghostty_config_load_file(config, path.constData());
+  ghostty_config_finalize(config);
+  return config;
+}
 }  // namespace
 
 class WindowActionsTest final : public QObject {
@@ -66,7 +83,52 @@ class WindowActionsTest final : public QObject {
   void enumeratesGlobalBindings();
   void mapsMouseCoordinates();
   void keepsTabAsTerminalInput();
+  void controlsTabBarVisibility();
 };
+
+void WindowActionsTest::controlsTabBarVisibility() {
+  GhosttyApp ghostty;
+  QVERIFY(ghostty.initialize());
+  MainWindow window(&ghostty);
+  auto* tabBar = window.findChild<QTabBar*>(QStringLiteral("qhostty-tabs"));
+  QVERIFY(tabBar != nullptr);
+
+  ghostty_config_t config = configFromText("window-show-tab-bar = auto\n");
+  QVERIFY(config != nullptr);
+  window.applyConfig(config);
+  ghostty_config_free(config);
+  QVERIFY(tabBar->isHidden());
+
+  window.addTab();
+  QVERIFY(!tabBar->isHidden());
+
+  ghostty_action_s action{};
+  action.tag = GHOSTTY_ACTION_CLOSE_TAB;
+  QVERIFY(window.handleAction(window.currentTab()->activeTerminal(), action)
+              .value_or(false));
+  QCOMPARE(tabBar->count(), 1);
+  QVERIFY(tabBar->isHidden());
+
+  config = configFromText("window-show-tab-bar = always\n");
+  QVERIFY(config != nullptr);
+  action = {};
+  action.tag = GHOSTTY_ACTION_CONFIG_CHANGE;
+  action.action.config_change.config = config;
+  QVERIFY(window.currentTab()->activeTerminal()->handleAction(action).value_or(
+      false));
+  ghostty_config_free(config);
+  QVERIFY(!tabBar->isHidden());
+
+  window.addTab();
+  QCOMPARE(tabBar->count(), 2);
+  config = configFromText("window-show-tab-bar = never\n");
+  QVERIFY(config != nullptr);
+  action.action.config_change.config = config;
+  QVERIFY(window.currentTab()->activeTerminal()->handleAction(action).value_or(
+      false));
+  ghostty_config_free(config);
+  QVERIFY(tabBar->isHidden());
+}
 
 void WindowActionsTest::keepsTabAsTerminalInput() {
   GhosttyApp ghostty;

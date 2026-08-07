@@ -560,6 +560,7 @@ std::optional<bool> TerminalWidget::handleAction(
         m_scrollBar->hide();
       }
       layoutOverlays();
+      emit configChanged(m_appliedConfig);
       return true;
     }
     case GHOSTTY_ACTION_SCROLLBAR:

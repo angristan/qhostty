@@ -35,6 +35,7 @@ class TerminalTab final : public QWidget {
  signals:
   void titleChanged(const QString& title);
   void closeRequested(TerminalTab* tab);
+  void configChanged(ghostty_config_t config);
 
  private:
   void connectTerminal(TerminalWidget* terminal);
