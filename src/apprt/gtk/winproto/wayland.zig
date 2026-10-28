@@ -306,7 +306,7 @@ pub const Window = struct {
         }
 
         const wl_region = try compositor.createRegion();
-        errdefer if (wl_region) |r| r.destroy();
+        defer wl_region.destroy();
         for (region.slices.items) |s| wl_region.add(
             @intCast(s.x),
             @intCast(s.y),
@@ -315,6 +315,7 @@ pub const Window = struct {
         );
 
         bg.setBlurRegion(wl_region);
+        self.blur_region.deinit(self.globals.alloc);
         self.blur_region = region;
     }
 
@@ -323,7 +324,7 @@ pub const Window = struct {
 
         // The protocol requests uint instead of enum so we have
         // to convert it.
-        deco.requestMode(@intCast(@intFromEnum(self.getDecorationMode())));
+        deco.requestMode(@intCast(@backingInt(self.getDecorationMode())));
     }
 
     fn getDecorationMode(self: Window) org.KdeKwinServerDecorationManager.Mode {
@@ -410,7 +411,7 @@ pub const Window = struct {
                 .right => .right,
             };
 
-            slide.setLocation(@intCast(@intFromEnum(slide_location)));
+            slide.setLocation(@intCast(@backingInt(slide_location)));
             slide.commit();
             break :slide slide;
         } else null;

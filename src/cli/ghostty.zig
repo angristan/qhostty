@@ -21,6 +21,7 @@ const crash_report = @import("crash_report.zig");
 const show_face = @import("show_face.zig");
 const boo = @import("boo.zig");
 const new_window = @import("new_window.zig");
+const new_tab = @import("new_tab.zig");
 const toggle_quick_terminal = @import("toggle_quick_terminal.zig");
 const global = @import("../global.zig");
 
@@ -79,6 +80,9 @@ pub const Action = enum {
     // Use IPC to tell the running Ghostty to open a new window.
     @"new-window",
 
+    // Use IPC to tell the running Ghostty to open a new tab.
+    @"new-tab",
+
     // Use IPC to tell the running Ghostty to toggle the quick terminal.
     @"toggle-quick-terminal",
 
@@ -114,19 +118,19 @@ pub const Action = enum {
             // If help is requested, then we use some comptime trickery
             // to find this action in the help strings and output that.
             help_error => err: {
-                inline for (@typeInfo(Action).@"enum".fields) |field| {
+                inline for (@typeInfo(Action).@"enum".field_names) |field| {
                     // Future note: for now we just output the help text directly
                     // to stdout. In the future we can style this much prettier
                     // for all commands by just changing this one place.
 
-                    if (std.mem.eql(u8, field.name, @tagName(self))) {
+                    if (std.mem.eql(u8, field, @tagName(self))) {
                         var buffer: [1024]u8 = undefined;
                         var stdout_writer = std.Io.File.stdout().writer(
                             global.io(),
                             &buffer,
                         );
                         const stdout = &stdout_writer.interface;
-                        const text = @field(help_strings.Action, field.name) ++ "\n";
+                        const text = @field(help_strings.Action, field) ++ "\n";
                         stdout.writeAll(text) catch |write_err| {
                             std.log.warn("failed to write help text: {}\n", .{write_err});
                             break :err 1;
@@ -165,6 +169,7 @@ pub const Action = enum {
             .@"show-face" => try show_face.run(alloc),
             .boo => try boo.run(alloc),
             .@"new-window" => try new_window.run(alloc),
+            .@"new-tab" => try new_tab.run(alloc),
             .@"toggle-quick-terminal" => try toggle_quick_terminal.run(alloc),
         };
     }
@@ -207,6 +212,7 @@ pub const Action = enum {
                 .@"show-face" => show_face.Options,
                 .boo => boo.Options,
                 .@"new-window" => new_window.Options,
+                .@"new-tab" => new_tab.Options,
                 .@"toggle-quick-terminal" => toggle_quick_terminal.Options,
             };
         }

@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 const buildpkg = @import("src/build/main.zig");
+const translate_c = @import("translate_c");
 
 /// App version from build.zig.zon.
 const app_zon_version = @import("build.zig.zon").version;
@@ -24,7 +25,7 @@ pub fn build(b: *std.Build) !void {
     // If we have a VERSION file (present in source tarballs) then we
     // use that as the version source of truth. Otherwise we fall back
     // to what is in the build.zig.zon.
-    const file_version: ?[]const u8 = if (b.build_root.handle.readFileAlloc(
+    const file_version: ?[]const u8 = if (b.root.root_dir.handle.readFileAlloc(
         b.graph.io,
         "VERSION",
         b.allocator,
@@ -68,6 +69,14 @@ pub fn build(b: *std.Build) !void {
     const test_lib_vt_step = b.step(
         "test-lib-vt",
         "Run libghostty-vt tests",
+    );
+    const test_lib_vt_build_step = b.step(
+        "test-lib-vt-build",
+        "Build libghostty-vt tests without running them (compile check)",
+    );
+    const test_lib_vt_schema_step = b.step(
+        "test-lib-vt-schema",
+        "Validate the libghostty-vt ABI type manifest",
     );
     const test_valgrind_step = b.step(
         "test-valgrind",
@@ -117,20 +126,33 @@ pub fn build(b: *std.Build) !void {
     }
 
     // libghostty-vt
-    const libghostty_vt_shared = shared: {
+    const native_freestanding = config.target.result.os.tag == .freestanding and
+        !config.target.result.cpu.arch.isWasm();
+    const libghostty_vt_shared: ?buildpkg.GhosttyLibVt = shared: {
         if (config.target.result.cpu.arch.isWasm()) {
             break :shared try buildpkg.GhosttyLibVt.initWasm(
                 b,
                 &mod,
             );
         }
+        if (native_freestanding) break :shared null;
 
         break :shared try buildpkg.GhosttyLibVt.initShared(
             b,
             &mod,
         );
     };
-    libghostty_vt_shared.install(b.getInstallStep());
+    if (libghostty_vt_shared) |shared| {
+        shared.install(b.getInstallStep());
+
+        const type_schema_test = b.addSystemCommand(&.{"python3"});
+        type_schema_test.addFileArg(b.path("src/terminal/c/types-schema-verify.py"));
+        type_schema_test.addFileArg(b.path("src/terminal/c/types.schema.json"));
+        type_schema_test.addFileArg(shared.output);
+        test_lib_vt_schema_step.dependOn(&type_schema_test.step);
+    } else {
+        _ = b.addFail("cannot execute the ABI manifest for a native freestanding target");
+    }
 
     // libghostty-vt static lib
     const libghostty_vt_static = try buildpkg.GhosttyLibVt.initStatic(
@@ -153,6 +175,15 @@ pub fn build(b: *std.Build) !void {
             libghostty_vt_static.output,
             static_lib_name,
         ).step);
+
+        if (native_freestanding) {
+            b.getInstallStep().dependOn(&b.addInstallDirectory(.{
+                .source_dir = b.path("include/ghostty"),
+                .install_dir = .header,
+                .install_subdir = "ghostty",
+                .include_extensions = &.{".h"},
+            }).step);
+        }
     }
 
     // libghostty-vt xcframework (Apple only, universal binary).
@@ -160,7 +191,7 @@ pub fn build(b: *std.Build) !void {
     // xcodebuild is required.
     if (config.emit_lib_vt and
         config.emit_xcframework and
-        builtin.os.tag.isDarwin() and
+        builtin.target.os.tag.isDarwin() and
         config.target.result.os.tag.isDarwin())
     {
         const apple_libs = try buildpkg.GhosttyLibVt.initStaticAppleUniversal(
@@ -247,16 +278,17 @@ pub fn build(b: *std.Build) !void {
     run: {
         if (config.app_runtime != .none) {
             const run_cmd = b.addRunArtifact(exe.exe);
-            if (b.args) |args| run_cmd.addArgs(args);
+            run_cmd.addPassthruArgs();
 
             // Set the proper resources dir so things like shell integration
             // work correctly. If we're running `zig build run` in Ghostty,
             // this also ensures it overwrites the release one with our debug
             // build.
-            run_cmd.setEnvironmentVariable(
-                "GHOSTTY_RESOURCES_DIR",
-                b.getInstallPath(.prefix, "share/ghostty"),
-            );
+            // FIXME: This is not possible after Zig 0.17.
+            // run_cmd.setEnvironmentVariable(
+            //     "GHOSTTY_RESOURCES_DIR",
+            //     b.getInstallPath(.prefix, "share/ghostty"),
+            // );
 
             run_step.dependOn(&run_cmd.step);
             break :run;
@@ -312,18 +344,20 @@ pub fn build(b: *std.Build) !void {
         const run_cmd = b.addSystemCommand(&.{
             "valgrind",
             "--leak-check=full",
+            "--error-exitcode=1",
             "--num-callers=50",
-            b.fmt("--suppressions={s}", .{b.pathFromRoot("valgrind.supp")}),
             "--gen-suppressions=all",
         });
+        run_cmd.addFileArg2(b.path("valgrind.supp"), .{ .prefix = "--suppressions=" });
         run_cmd.addArtifactArg(valgrind_exe.exe);
-        if (b.args) |args| run_cmd.addArgs(args);
+        run_cmd.addPassthruArgs();
         run_valgrind_step.dependOn(&run_cmd.step);
     }
 
     // Zig module tests
     {
         const mod_vt_test = b.addTest(.{
+            .name = "ghostty-vt-test",
             .root_module = mod.vt,
             .filters = test_filters,
         });
@@ -331,11 +365,25 @@ pub fn build(b: *std.Build) !void {
         test_lib_vt_step.dependOn(&mod_vt_test_run.step);
 
         const mod_vt_c_test = b.addTest(.{
+            .name = "ghostty-vt-c-test",
             .root_module = mod.vt_c,
             .filters = test_filters,
         });
         const mod_vt_c_test_run = b.addRunArtifact(mod_vt_c_test);
         test_lib_vt_step.dependOn(&mod_vt_c_test_run.step);
+
+        if (config.emit_test_exe) {
+            // With -Demit-test-exe, test-lib-vt-build builds only the C API
+            // test binary and installs it to zig-out/bin, so it can run on
+            // another machine. CI uses this to run it in a FreeBSD VM. The
+            // C API binary already runs every test in the Zig one, and
+            // compiling both at once can run a CI runner out of memory.
+            const install = b.addInstallArtifact(mod_vt_c_test, .{});
+            test_lib_vt_build_step.dependOn(&install.step);
+        } else {
+            test_lib_vt_build_step.dependOn(&mod_vt_test.step);
+            test_lib_vt_build_step.dependOn(&mod_vt_c_test.step);
+        }
     }
 
     // Tests (skip when building libghostty-vt)
@@ -347,7 +395,7 @@ pub fn build(b: *std.Build) !void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),
                 .target = config.baselineTarget(b.graph.io),
-                .optimize = .Debug,
+                .optimize = .debug,
                 .strip = false,
                 .omit_frame_pointer = false,
                 .unwind_tables = .sync,
@@ -362,7 +410,7 @@ pub fn build(b: *std.Build) !void {
         }
         _ = try deps.add(test_exe);
 
-        addGhosttyH(b, test_exe.root_module, config.baselineTarget(b.graph.io), .Debug);
+        addGhosttyH(b, test_exe.root_module, config.baselineTarget(b.graph.io), .debug);
 
         // Normal test running
         const test_run = b.addRunArtifact(test_exe);
@@ -376,10 +424,11 @@ pub fn build(b: *std.Build) !void {
         const valgrind_run = b.addSystemCommand(&.{
             "valgrind",
             "--leak-check=full",
+            "--error-exitcode=1",
             "--num-callers=50",
-            b.fmt("--suppressions={s}", .{b.pathFromRoot("valgrind.supp")}),
             "--gen-suppressions=all",
         });
+        valgrind_run.addFileArg2(b.path("valgrind.supp"), .{ .prefix = "--suppressions=" });
         valgrind_run.addArtifactArg(test_exe);
         config.addPatchElf(test_exe, &valgrind_run.step);
         test_valgrind_step.dependOn(&valgrind_run.step);
@@ -390,7 +439,7 @@ pub fn build(b: *std.Build) !void {
     if (i18n) |v| {
         translations_step.dependOn(v.update_step);
     } else {
-        try translations_step.addError("cannot update translations when i18n is disabled", .{});
+        _ = b.addFail("cannot update translations when i18n is disabled");
     }
 }
 
@@ -398,23 +447,14 @@ fn addGhosttyH(
     b: *std.Build,
     module: *std.Build.Module,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) void {
-    const translate_c = b.lazyImport(@This(), "translate_c") orelse return;
-    const translate_c_dep = b.lazyDependency("translate_c", .{}) orelse return;
-
-    const translated: translate_c.Translator = .init(translate_c_dep, .{
-        .c_source_file = b.addWriteFiles().add(
-            "hb_c.h",
-            \\#include <ghostty.h>
-            ,
-        ),
+    translate_c.addImportToModule(b, "ghostty.h", module, .{
+        .source = .{ .includes = .{ .files = &.{
+            .{ .path = "ghostty.h" },
+        } } },
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
-    });
-
-    translated.addSystemIncludePath(b.path("include"));
-
-    module.addImport("ghostty.h", translated.mod);
+        .system_include_paths = &.{b.path("include")},
+    }) catch unreachable;
 }

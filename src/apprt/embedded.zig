@@ -28,10 +28,6 @@ const log = std.log.scoped(.embedded_window);
 pub const resourcesDir = internal_os.resourcesDir;
 
 pub const App = struct {
-    /// OpenGL hosts such as Qt require all drawing on the application thread.
-    /// Metal hosts keep the existing renderer-thread behavior.
-    pub const must_draw_from_app_thread = builtin.target.os.tag == .linux;
-
     /// Because we only expect the embedding API to be used in embedded
     /// environments, the options are extern so that we can expose it
     /// directly to a C callconv and not pay for any translation costs.
@@ -56,18 +52,36 @@ pub const App = struct {
         /// Callback called to handle an action.
         action: *const fn (*App, apprt.Target.C, apprt.Action.C) callconv(.c) bool,
 
-        /// Read the clipboard value. Returns true if the clipboard request
-        /// was started and complete_clipboard_request may be called with the
-        /// given state pointer. Returns false if the clipboard request couldn't
-        /// be started (such as when no text is available for a paste request).
-        read_clipboard: *const fn (SurfaceUD, c_int, *apprt.ClipboardRequest) callconv(.c) bool,
+        /// Read the clipboard value. The result only reports facts about
+        /// the clipboard: whether the request was started (in which case
+        /// complete_clipboard_request or deny_clipboard_request must
+        /// eventually be called with the given state pointer), whether the
+        /// clipboard has no servable contents, or whether the clipboard
+        /// can't be read at all. How each non-started state is answered is
+        /// up to the core.
+        ///
+        /// The MIME types are exactly the representations the caller wants
+        /// served; the embedder should read only those. Text-like types
+        /// are always requested as the canonical "text/plain". The final
+        /// bool asks for the listing of all MIME types available on the
+        /// clipboard to be delivered with the completion.
+        read_clipboard: *const fn (
+            SurfaceUD,
+            c_int,
+            *apprt.ClipboardRequest,
+            [*]const [*:0]const u8,
+            usize,
+            bool,
+        ) callconv(.c) apprt.ClipboardReadResult,
 
         /// This may be called after a read clipboard call to request
-        /// confirmation that the clipboard value is safe to read. The embedder
-        /// must call complete_clipboard_request with the given request.
+        /// confirmation that the clipboard value is safe to read. The
+        /// embedder must call complete_clipboard_request (usually with
+        /// the confirmation's contents, which are only borrowed for
+        /// this call) or deny_clipboard_request with the given request.
         confirm_read_clipboard: *const fn (
             SurfaceUD,
-            [*:0]const u8,
+            *const CAPI.ClipboardConfirm,
             *apprt.ClipboardRequest,
             apprt.ClipboardRequestType,
         ) callconv(.c) void,
@@ -131,7 +145,13 @@ pub const App = struct {
 
     core_app: *CoreApp,
     opts: Options,
-    keymap: input.Keymap,
+
+    /// The keyboard layout keymap. This is lazily initialized on first
+    /// use because creating it requires talking to the text input
+    /// system (TIS on macOS), and the first such call in a process is
+    /// slow (multiple milliseconds). It is only needed once keyboard
+    /// events start flowing, at which point the system is warm.
+    keymap: ?input.Keymap,
 
     /// The configuration for the app. This is owned by this structure.
     config: Config,
@@ -147,19 +167,16 @@ pub const App = struct {
         var config_clone = try config.clone(alloc);
         errdefer config_clone.deinit();
 
-        var keymap = try input.Keymap.init();
-        errdefer keymap.deinit();
-
         self.* = .{
             .core_app = core_app,
             .config = config_clone,
             .opts = opts,
-            .keymap = keymap,
+            .keymap = null,
         };
     }
 
     pub fn terminate(self: *App) void {
-        self.keymap.deinit();
+        if (self.keymap) |*v| v.deinit();
         self.config.deinit();
     }
 
@@ -219,8 +236,10 @@ pub const App = struct {
 
     /// This should be called whenever the keyboard layout was changed.
     pub fn reloadKeymap(self: *App) !void {
-        // Reload the keymap
-        try self.keymap.reload();
+        // Reload the keymap. If it was never initialized we don't need
+        // to do anything since lazy initialization will pick up the
+        // current layout.
+        if (self.keymap) |*v| try v.reload();
     }
 
     /// Loads the keyboard layout.
@@ -228,13 +247,25 @@ pub const App = struct {
     /// Kind of expensive so this should be avoided if possible. When I say
     /// "kind of expensive" I mean that its not something you probably want
     /// to run on every keypress.
-    pub fn keyboardLayout(self: *const App) input.KeyboardLayout {
+    pub fn keyboardLayout(self: *App) input.KeyboardLayout {
         // We only support keyboard layout detection on macOS.
-        if (comptime builtin.os.tag != .macos) return .unknown;
+        if (comptime builtin.target.os.tag != .macos) return .unknown;
+
+        // Lazily initialize the keymap.
+        const keymap: *input.Keymap = keymap: {
+            if (self.keymap == null) {
+                self.keymap = input.Keymap.init() catch |err| {
+                    log.warn("error initializing keymap err={}", .{err});
+                    return .unknown;
+                };
+            }
+
+            break :keymap &self.keymap.?;
+        };
 
         // Any layout larger than this is not something we can handle.
         var buf: [256]u8 = undefined;
-        const id = self.keymap.sourceId(&buf) catch |err| {
+        const id = keymap.sourceId(&buf) catch |err| {
             comptime assert(@TypeOf(err) == error{OutOfMemory});
             return .unknown;
         };
@@ -313,7 +344,7 @@ pub const App = struct {
                     // error we just ignore it, since this only breaks a few minor things.
                     const alloc = self.core_app.alloc;
                     if (surface.rt_surface.title) |v| alloc.free(v);
-                    surface.rt_surface.title = alloc.dupeZ(u8, value.title) catch null;
+                    surface.rt_surface.title = alloc.dupeSentinel(u8, value.title, 0) catch null;
                 },
             },
 
@@ -348,6 +379,7 @@ pub const App = struct {
     ) (Allocator.Error || apprt.ipc.Errors)!bool {
         switch (action) {
             .new_window => return false,
+            .new_tab => return false,
             .toggle_quick_terminal => return false,
         }
     }
@@ -371,16 +403,11 @@ pub const Platform = union(PlatformTag) {
         uiview: objc.Object,
     } else void;
 
-    /// Callbacks supplied by an OpenGL host. The host must make its context
-    /// current before creating, drawing, or destroying the surface.
+    /// An OpenGL host such as Qt. The renderer owns its own EGL context and
+    /// render thread; the host pulls finished frames with
+    /// `ghostty_surface_take_frame` when it receives a render action.
     pub const OpenGL = struct {
-        const Proc = *const fn () callconv(.c) void;
-        pub const GetProcAddress = *const fn ([*:0]const u8) callconv(.c) ?Proc;
-        pub const GetFramebuffer = *const fn (?*anyopaque) callconv(.c) u32;
-
         userdata: ?*anyopaque,
-        get_proc_address: GetProcAddress,
-        get_framebuffer: GetFramebuffer,
     };
 
     // The C ABI compatible version of this union. The tag is expected
@@ -396,8 +423,6 @@ pub const Platform = union(PlatformTag) {
 
         opengl: extern struct {
             userdata: ?*anyopaque,
-            get_proc_address: ?OpenGL.GetProcAddress,
-            get_framebuffer: ?OpenGL.GetFramebuffer,
         },
     };
 
@@ -419,16 +444,7 @@ pub const Platform = union(PlatformTag) {
                 break :ios .{ .ios = .{ .uiview = uiview } };
             } else error.UnsupportedPlatform,
 
-            .opengl => opengl: {
-                const config = c_platform.opengl;
-                break :opengl .{ .opengl = .{
-                    .userdata = config.userdata,
-                    .get_proc_address = config.get_proc_address orelse
-                        break :opengl error.OpenGLGetProcAddressMustBeSet,
-                    .get_framebuffer = config.get_framebuffer orelse
-                        break :opengl error.OpenGLGetFramebufferMustBeSet,
-                } };
-            },
+            .opengl => .{ .opengl = .{ .userdata = c_platform.opengl.userdata } },
         };
     }
 };
@@ -587,8 +603,8 @@ pub const Surface = struct {
                 const value = std.mem.sliceTo(env_var.value, 0);
                 try config.env.map.put(
                     alloc,
-                    try alloc.dupeZ(u8, key),
-                    try alloc.dupeZ(u8, value),
+                    try alloc.dupeSentinel(u8, key, 0),
+                    try alloc.dupeSentinel(u8, value, 0),
                 );
             }
         }
@@ -708,7 +724,13 @@ pub const Surface = struct {
     ) bool {
         return switch (clipboard_type) {
             .standard => true,
-            .selection, .primary => self.app.opts.supports_selection_clipboard,
+            .selection => self.app.opts.supports_selection_clipboard,
+
+            // No embedder can serve the primary selection: the embedding
+            // API has no option to declare support for it, and macOS (the
+            // only GUI embedder) has no primary selection. The selection
+            // flag above covers a distinct custom pasteboard, not this.
+            .primary => false,
         };
     }
 
@@ -716,7 +738,67 @@ pub const Surface = struct {
         self: *Surface,
         clipboard_type: apprt.Clipboard,
         state: apprt.ClipboardRequest,
-    ) !bool {
+    ) !apprt.ClipboardReadResult {
+        // Kitty clipboard writes carry their own contents and read
+        // nothing from the clipboard, so they skip the read callback
+        // entirely: the request is completed immediately, and a
+        // completion that requires confirmation diverts into the
+        // apprt confirmation flow just like a read.
+        if (state == .kitty_write) {
+            // A write to a location the embedder can't serve is
+            // rejected before the transaction completes so the caller
+            // answers ENOSYS without a permission prompt, matching
+            // reads, where the embedder reports an unsupported
+            // location from the read callback. The write callback only
+            // fires after any prompt, so it is too late to reject.
+            if (!self.supportsClipboard(clipboard_type)) return .unsupported;
+
+            const alloc = self.app.core_app.alloc;
+            const state_ptr = try alloc.create(apprt.ClipboardRequest);
+            errdefer alloc.destroy(state_ptr);
+            state_ptr.* = state;
+            self.completeKittyClipboardWrite(state_ptr);
+            return .started;
+        }
+
+        // The representations the read wants served. Text-only
+        // requesters ask for the canonical text type; Kitty clipboard
+        // reads ask for exactly what the program requested, with
+        // text-like aliases normalized so the embedder never has to
+        // know about them.
+        var mimes_buf: [terminal.kitty.clipboard.max_read_mimes][*:0]const u8 = undefined;
+        const mimes: []const [*:0]const u8 = switch (state) {
+            .paste, .osc_52_read => &.{"text/plain"},
+
+            // A mode 5522 paste event only lists types and must not read
+            // any clipboard data.
+            .list => &.{},
+
+            .kitty_read => |kitty| mimes: {
+                assert(kitty.mimes.len <= mimes_buf.len);
+                for (kitty.mimes, mimes_buf[0..kitty.mimes.len]) |mime, *dst| {
+                    dst.* = if (terminal.clipboard.isTextMime(mime))
+                        "text/plain"
+                    else
+                        mime.ptr;
+                }
+                break :mimes mimes_buf[0..kitty.mimes.len];
+            },
+
+            // Handled above.
+            .kitty_write => unreachable,
+
+            // No clipboard write code paths travel through this function
+            .osc_52_write => unreachable,
+        };
+        const list = switch (state) {
+            // Paste events need the full MIME listing without reading any
+            // representation. Kitty reads only ask for it when requested.
+            .list => true,
+            .kitty_read => |kitty| kitty.list,
+            else => false,
+        };
+
         // We need to allocate to get a pointer to store our clipboard request
         // so that it is stable until the read_clipboard callback and call
         // complete_clipboard_request. This sucks but clipboard requests aren't
@@ -726,40 +808,68 @@ pub const Surface = struct {
         errdefer alloc.destroy(state_ptr);
         state_ptr.* = state;
 
-        const started = self.app.opts.read_clipboard(
+        const result = self.app.opts.read_clipboard(
             self.userdata,
-            @intCast(@intFromEnum(clipboard_type)),
+            @intCast(@backingInt(clipboard_type)),
             state_ptr,
+            mimes.ptr,
+            mimes.len,
+            list,
         );
-        if (!started) {
-            alloc.destroy(state_ptr);
-            return false;
-        }
 
-        return true;
+        // Only a started request completes later and keeps the state.
+        if (result != .started) alloc.destroy(state_ptr);
+        return result;
     }
 
-    fn completeClipboardRequest(
+    /// Complete a Kitty clipboard protocol write request. The apprt
+    /// contributes nothing to the completion (the authoritative
+    /// contents live in the request itself), but a completion that
+    /// requires confirmation diverts into the confirm callback, which
+    /// keeps the state alive for the asynchronous prompt.
+    fn completeKittyClipboardWrite(
         self: *Surface,
-        str: [:0]const u8,
         state: *apprt.ClipboardRequest,
-        confirmed: bool,
     ) void {
         const alloc = self.app.core_app.alloc;
+        const kitty = state.kitty_write;
 
-        // Attempt to complete the request, but we may request
-        // confirmation.
         self.core_surface.completeClipboardRequest(
             state.*,
-            str,
-            confirmed,
+            .{},
         ) catch |err| switch (err) {
-            error.UnsafePaste,
-            error.UnauthorizedPaste,
-            => {
+            error.UnauthorizedPaste => {
+                // Convert the would-be contents so the permission
+                // prompt can display exactly what would be written.
+                var stack_buf: [1024]u8 = undefined;
+                var stack: std.heap.BufferFirstAllocator = .init(&stack_buf, alloc);
+                const conv_alloc = stack.allocator();
+                const contents = conv_alloc.alloc(
+                    CAPI.ClipboardContent,
+                    kitty.contents.len,
+                ) catch |alloc_err| {
+                    log.err("error confirming clipboard request err={}", .{alloc_err});
+                    self.core_surface.denyClipboardRequest(state.*);
+                    alloc.destroy(state);
+                    return;
+                };
+                defer conv_alloc.free(contents);
+                for (kitty.contents, contents) |src, *dst| dst.* = .{
+                    .mime = src.mime,
+                    .data = src.data.ptr,
+                    .len = src.data.len,
+                };
+
                 self.app.opts.confirm_read_clipboard(
                     self.userdata,
-                    str.ptr,
+                    &.{
+                        .contents = contents.ptr,
+                        .contents_len = contents.len,
+                        .available = null,
+                        .available_len = 0,
+                        .name = if (kitty.name.len > 0) kitty.name.ptr else null,
+                        .can_remember = kitty.pw.len > 0,
+                    },
                     state,
                     state.*,
                 );
@@ -775,6 +885,104 @@ pub const Surface = struct {
         alloc.destroy(state);
     }
 
+    fn completeClipboardRequest(
+        self: *Surface,
+        complete: *const CAPI.ClipboardComplete,
+        state: *apprt.ClipboardRequest,
+    ) void {
+        const alloc = self.app.core_app.alloc;
+
+        // Convert the C representations to the core types. Everything
+        // remains borrowed from the caller for the duration of the call.
+        var stack_buf: [1024]u8 = undefined;
+        var stack: std.heap.BufferFirstAllocator = .init(&stack_buf, alloc);
+        const conv_alloc = stack.allocator();
+
+        const raw_contents: []const CAPI.ClipboardContent =
+            if (complete.contents) |v| v[0..complete.contents_len] else &.{};
+        const contents = conv_alloc.alloc(
+            terminal.clipboard.Content,
+            raw_contents.len,
+        ) catch |err| {
+            log.err("error completing clipboard request err={}", .{err});
+            alloc.destroy(state);
+            return;
+        };
+        defer conv_alloc.free(contents);
+        for (raw_contents, contents) |raw, *content| content.* = .{
+            .mime = std.mem.sliceTo(raw.mime, 0),
+            .data = raw.data[0..raw.len],
+        };
+
+        const raw_available: []const [*:0]const u8 =
+            if (complete.available) |v| v[0..complete.available_len] else &.{};
+        const available = conv_alloc.alloc(
+            []const u8,
+            raw_available.len,
+        ) catch |err| {
+            log.err("error completing clipboard request err={}", .{err});
+            alloc.destroy(state);
+            return;
+        };
+        defer conv_alloc.free(available);
+        for (raw_available, available) |raw, *mime| {
+            mime.* = std.mem.sliceTo(raw, 0);
+        }
+
+        // Attempt to complete the request, but we may request
+        // confirmation.
+        self.core_surface.completeClipboardRequest(state.*, .{
+            .contents = contents,
+            .available = available,
+            .confirmed = complete.confirmed,
+            .remember = complete.remember,
+        }) catch |err| switch (err) {
+            error.UnsafePaste,
+            error.UnauthorizedPaste,
+            => {
+                // Session grant information for the permission prompt,
+                // carried only by Kitty clipboard protocol requests.
+                const name: ?[*:0]const u8, const can_remember: bool = switch (state.*) {
+                    inline .kitty_read, .kitty_write => |kitty| .{
+                        if (kitty.name.len > 0) kitty.name.ptr else null,
+                        kitty.pw.len > 0,
+                    },
+                    else => .{ null, false },
+                };
+
+                self.app.opts.confirm_read_clipboard(
+                    self.userdata,
+                    &.{
+                        .contents = complete.contents,
+                        .contents_len = complete.contents_len,
+                        .available = complete.available,
+                        .available_len = complete.available_len,
+                        .name = name,
+                        .can_remember = can_remember,
+                    },
+                    state,
+                    state.*,
+                );
+
+                return;
+            },
+
+            else => log.err("error completing clipboard request err={}", .{err}),
+        };
+
+        // We don't defer this because the clipboard confirmation route
+        // preserves the clipboard request.
+        alloc.destroy(state);
+    }
+
+    fn denyClipboardRequest(
+        self: *Surface,
+        state: *apprt.ClipboardRequest,
+    ) void {
+        self.core_surface.denyClipboardRequest(state.*);
+        self.app.core_app.alloc.destroy(state);
+    }
+
     pub fn setClipboard(
         self: *const Surface,
         clipboard_type: apprt.Clipboard,
@@ -787,13 +995,14 @@ pub const Surface = struct {
         for (contents, 0..) |content, i| {
             array[i] = .{
                 .mime = content.mime,
-                .data = content.data,
+                .data = content.data.ptr,
+                .len = content.data.len,
             };
         }
 
         self.app.opts.write_clipboard(
             self.userdata,
-            @intCast(@intFromEnum(clipboard_type)),
+            @intCast(@backingInt(clipboard_type)),
             array.ptr,
             array.len,
             confirm,
@@ -812,6 +1021,10 @@ pub const Surface = struct {
     }
 
     pub fn draw(self: *Surface) void {
+        // OpenGL renderers own their GL context on the render thread, so the
+        // host can't force a draw from its own thread.
+        if (self.platform == .opengl) return;
+
         self.core_surface.draw() catch |err| {
             log.err("error in draw err={}", .{err});
             return;
@@ -948,6 +1161,38 @@ pub const Surface = struct {
         };
     }
 
+    /// Paste explicit text into the surface as if it came from the
+    /// clipboard, regardless of the actual clipboard contents. Unlike
+    /// textCallback, this honors paste protection: unsafe text routes
+    /// through the confirm_read_clipboard callback before it is sent.
+    pub fn pasteText(self: *Surface, text: [:0]const u8) void {
+        if (text.len == 0) return;
+
+        // The request state must be heap allocated because it outlives
+        // this call if confirmation is required. completeClipboardRequest
+        // takes ownership of it in every path.
+        const alloc = self.app.core_app.alloc;
+        const state = alloc.create(apprt.ClipboardRequest) catch |err| {
+            log.err("error allocating paste request err={}", .{err});
+            return;
+        };
+        state.* = .{ .paste = .standard };
+
+        const contents = [_]CAPI.ClipboardContent{.{
+            .mime = "text/plain",
+            .data = text.ptr,
+            .len = text.len,
+        }};
+        self.completeClipboardRequest(&.{
+            .contents = &contents,
+            .contents_len = contents.len,
+            .available = null,
+            .available_len = 0,
+            .confirmed = false,
+            .remember = false,
+        }, state);
+    }
+
     pub fn focusCallback(self: *Surface, focused: bool) void {
         self.core_surface.focusCallback(focused) catch |err| {
             log.err("error in focus callback err={}", .{err});
@@ -983,7 +1228,7 @@ pub const Surface = struct {
             if (!apprt.surface.shouldInheritWorkingDirectory(context, &self.app.config)) break :wd null;
             const cwd = self.core_surface.pwd(self.app.core_app.alloc) catch null orelse break :wd null;
             defer self.app.core_app.alloc.free(cwd);
-            break :wd self.app.core_app.alloc.dupeZ(u8, cwd) catch null;
+            break :wd self.app.core_app.alloc.dupeSentinel(u8, cwd, 0) catch null;
         };
 
         return .{
@@ -1029,6 +1274,12 @@ pub const Surface = struct {
     fn cursorPosToPixels(self: *const Surface, pos: apprt.CursorPos) !apprt.CursorPos {
         const scale = try self.getContentScale();
         return .{ .x = pos.x * scale.x, .y = pos.y * scale.y };
+    }
+
+    pub fn renderDeviceOptions(self: *const Surface) !renderer.Device.Options {
+        // The Metal renderer currently does not have any options
+        _ = self;
+        return .{};
     }
 };
 
@@ -1335,6 +1586,30 @@ pub const Inspector = struct {
 
 // C API
 pub const CAPI = struct {
+    /// A rendered frame handed to an OpenGL host. Mirrors `ghostty_frame_s`.
+    pub const Frame = extern struct {
+        pub const Kind = enum(c_int) { none = 0, dmabuf = 1, memory = 2 };
+
+        kind: Kind = .none,
+        width: u32 = 0,
+        height: u32 = 0,
+        premultiplied: bool = false,
+
+        /// `memory`: tightly packed RGBA8 rows, `width * 4` bytes each.
+        pixels: ?[*]const u8 = null,
+
+        /// `dmabuf`: the format and its planes. The fds stay owned by the
+        /// frame and are closed by `ghostty_frame_release`.
+        fourcc: u32 = 0,
+        modifier: u64 = 0,
+        plane_count: u32 = 0,
+        fds: [4]c_int = @splat(-1),
+        offsets: [4]c_int = @splat(0),
+        strides: [4]c_int = @splat(0),
+
+        handle: ?*anyopaque = null,
+    };
+
     /// This is the same as Surface.KeyEvent but this is the raw C API version.
     const KeyEvent = extern struct {
         action: input.Action,
@@ -1380,9 +1655,48 @@ pub const CAPI = struct {
     };
 
     // ghostty_clipboard_content_s
+    //
+    // One representation of clipboard contents. The data is binary-safe
+    // and its length is explicit; it is not sentinel-terminated.
     const ClipboardContent = extern struct {
         mime: [*:0]const u8,
-        data: [*:0]const u8,
+        data: [*]const u8,
+        len: usize,
+    };
+
+    // ghostty_clipboard_complete_s
+    //
+    // The payload for completing a clipboard read request. See
+    // Surface.CompleteClipboard for the field documentation.
+    const ClipboardComplete = extern struct {
+        contents: ?[*]const ClipboardContent,
+        contents_len: usize,
+        available: ?[*]const [*:0]const u8,
+        available_len: usize,
+        confirmed: bool,
+        remember: bool,
+    };
+
+    // ghostty_clipboard_confirm_s
+    //
+    // The payload of a clipboard read confirmation request: the
+    // would-be completion contents plus the information shown in the
+    // permission prompt. All memory is borrowed for the duration of
+    // the confirm_read_clipboard callback.
+    const ClipboardConfirm = extern struct {
+        contents: ?[*]const ClipboardContent,
+        contents_len: usize,
+        available: ?[*]const [*:0]const u8,
+        available_len: usize,
+
+        /// The human friendly name of the requesting program for the
+        /// prompt, null when the protocol doesn't carry one.
+        name: ?[*:0]const u8,
+
+        /// True when the user's decision may be remembered as a
+        /// session grant, reported back through the completion's
+        /// remember field.
+        can_remember: bool,
     };
 
     // ghostty_text_s
@@ -1586,7 +1900,7 @@ pub const CAPI = struct {
 
     /// Open the configuration.
     export fn ghostty_app_open_config(v: *App) void {
-        _ = v.performAction(.app, .open_config, {}) catch |err| {
+        _ = v.performAction(.app, .open_config, .new_window) catch |err| {
             log.err("error reloading config err={}", .{err});
             return;
         };
@@ -1793,31 +2107,87 @@ pub const CAPI = struct {
         surface.draw();
     }
 
-    /// Release GPU resources before an embedded OpenGL context is destroyed.
-    /// The host must make the context current before calling this function.
-    export fn ghostty_surface_opengl_unrealize(surface: *Surface) bool {
-        switch (surface.platform) {
-            .opengl => {
-                surface.core_surface.renderer.displayUnrealized();
-                return true;
-            },
-            else => return false,
-        }
+    /// Tell the renderer that the host display is gone, for example because
+    /// the window is hidden or being destroyed. GPU resources are released on
+    /// the render thread.
+    export fn ghostty_surface_display_unrealized(surface: *Surface) void {
+        surface.core_surface.displayUnrealized();
     }
 
-    /// Recreate GPU resources after an embedded OpenGL context is created.
-    /// The host must make the context current before calling this function.
-    export fn ghostty_surface_opengl_realize(surface: *Surface) bool {
-        switch (surface.platform) {
-            .opengl => {
-                surface.core_surface.renderer.displayRealized() catch |err| {
-                    log.err("error realizing OpenGL surface err={}", .{err});
-                    return false;
-                };
-                return true;
+    /// Tell the renderer that the host display is available again.
+    export fn ghostty_surface_display_realized(surface: *Surface) bool {
+        surface.core_surface.displayRealized() catch |err| {
+            log.err("error realizing surface err={}", .{err});
+            return false;
+        };
+        return true;
+    }
+
+    /// Take the most recent frame produced by the renderer, if any. The
+    /// host owns the frame until it calls `ghostty_frame_release`.
+    export fn ghostty_surface_take_frame(
+        surface: *Surface,
+        out: *Frame,
+    ) bool {
+        const Exported = renderer.Renderer.ExportedFrame;
+        if (comptime Exported == void) return false;
+
+        const frame = surface.core_surface.renderer.takeFrame() orelse return false;
+        const handle = surface.app.core_app.alloc.create(Exported) catch {
+            frame.deinit();
+            return false;
+        };
+        handle.* = frame;
+
+        out.* = .{ .handle = handle };
+        switch (frame) {
+            .dmabuf => |v| {
+                out.kind = .dmabuf;
+                out.width = v.width;
+                out.height = v.height;
+                out.fourcc = v.fourcc;
+                out.modifier = v.modifier;
+                out.premultiplied = v.premultiplied;
+                out.plane_count = v.planes.count;
+                for (0..v.planes.count) |i| {
+                    out.fds[i] = v.planes.fds[i];
+                    out.offsets[i] = v.planes.offsets[i];
+                    out.strides[i] = v.planes.strides[i];
+                }
             },
-            else => return false,
+            .memory => |v| {
+                out.kind = .memory;
+                out.width = v.width;
+                out.height = v.height;
+                out.premultiplied = true;
+                out.pixels = v.pixels.ptr;
+            },
         }
+        return true;
+    }
+
+    /// Release a frame obtained from `ghostty_surface_take_frame`,
+    /// closing its file descriptors or freeing its pixels.
+    export fn ghostty_frame_release(surface: *Surface, frame: *Frame) void {
+        const Exported = renderer.Renderer.ExportedFrame;
+        if (comptime Exported == void) return;
+
+        const handle: *Exported = @ptrCast(@alignCast(frame.handle orelse return));
+        handle.deinit();
+        surface.app.core_app.alloc.destroy(handle);
+        frame.* = .{};
+    }
+
+    /// Tell the renderer whether the host can present the frames it
+    /// exports. When unhealthy, the renderer exports CPU pixels instead
+    /// of DMABUFs.
+    export fn ghostty_surface_report_presentation_health(
+        surface: *Surface,
+        healthy: bool,
+    ) void {
+        surface.core_surface.reportPresentationHealth(
+            if (healthy) .healthy else .unhealthy,
+        );
     }
 
     /// Update the size of a surface. This will trigger resize notifications
@@ -1848,7 +2218,7 @@ pub const CAPI = struct {
     /// freed by the caller via ghostty_string_free.
     export fn ghostty_surface_tty_name(surface: *Surface) String {
         const tty_name = surface.core_surface.getProcessInfo(.tty_name) orelse return .empty;
-        const copy = surface.app.core_app.alloc.dupeZ(u8, tty_name) catch |err| {
+        const copy = surface.app.core_app.alloc.dupeSentinel(u8, tty_name, 0) catch |err| {
             log.err("error allocating tty name err={}", .{err});
             return .empty;
         };
@@ -1944,6 +2314,19 @@ pub const CAPI = struct {
         surface.textCallback(ptr[0..len]);
     }
 
+    /// Paste text into the terminal as if it came from the clipboard.
+    /// Unlike ghostty_surface_text, this applies paste protection, so
+    /// unsafe text (e.g. containing newlines) requests confirmation via
+    /// the confirm_read_clipboard callback. The text must be null
+    /// terminated and is copied as needed before this returns.
+    export fn ghostty_surface_paste_text(
+        surface: *Surface,
+        ptr: [*:0]const u8,
+        len: usize,
+    ) void {
+        surface.pasteText(ptr[0..len :0]);
+    }
+
     /// Set the preedit text for the surface. This is used for IME
     /// composition. If the length is 0, then the preedit text is cleared.
     export fn ghostty_surface_preedit(
@@ -2033,16 +2416,30 @@ pub const CAPI = struct {
     /// Request that the surface become closed. This will go through the
     /// normal trigger process that a close surface input binding would.
     export fn ghostty_surface_request_close(ptr: *Surface) void {
-        ptr.core_surface.close();
+        // Prefer the binding path so close goes through the same Surface
+        // hook as a close-surface keybind, rather than a raw close() that
+        // bypasses it.
+        const handled = ptr.core_surface.performBindingAction(.{ .close_surface = {} }) catch |err| {
+            log.err("error requesting close err={}", .{err});
+            return;
+        };
+        if (!handled) ptr.core_surface.close();
     }
 
     /// Request that the surface split in the given direction.
     export fn ghostty_surface_split(ptr: *Surface, direction: apprt.action.SplitDirection) void {
-        _ = ptr.app.performAction(
-            .{ .surface = &ptr.core_surface },
-            .new_split,
-            direction,
-        ) catch |err| {
+        // Menu shortcuts call this C API directly. Route through
+        // performBindingAction so menus and keybinds share one path,
+        // matching GTK.
+        const action: input.Binding.Action = .{
+            .new_split = switch (direction) {
+                .right => .right,
+                .left => .left,
+                .down => .down,
+                .up => .up,
+            },
+        };
+        _ = ptr.core_surface.performBindingAction(action) catch |err| {
             log.err("error creating new split err={}", .{err});
             return;
         };
@@ -2053,12 +2450,18 @@ pub const CAPI = struct {
         ptr: *Surface,
         direction: apprt.action.GotoSplit,
     ) void {
-        _ = ptr.app.performAction(
-            .{ .surface = &ptr.core_surface },
-            .goto_split,
-            direction,
-        ) catch |err| {
-            log.err("error creating new split err={}", .{err});
+        const action: input.Binding.Action = .{
+            .goto_split = switch (direction) {
+                .previous => .previous,
+                .next => .next,
+                .up => .up,
+                .down => .down,
+                .left => .left,
+                .right => .right,
+            },
+        };
+        _ = ptr.core_surface.performBindingAction(action) catch |err| {
+            log.err("error focusing split err={}", .{err});
             return;
         };
     }
@@ -2112,20 +2515,32 @@ pub const CAPI = struct {
         };
     }
 
-    /// Complete a clipboard read request started via the read callback.
-    /// This can only be called once for a given request. Once it is called
-    /// with a request the request pointer will be invalidated.
+    /// Complete a clipboard read request started via the read callback
+    /// with the representations that could be served and, if requested,
+    /// the listing of available MIME types. All memory is borrowed for
+    /// the duration of the call. This can only be called once for a given
+    /// request. Once it is called with a request the request pointer will
+    /// be invalidated.
+    ///
+    /// To deny a request use ghostty_surface_deny_clipboard_request
+    /// instead.
     export fn ghostty_surface_complete_clipboard_request(
         ptr: *Surface,
-        str: [*:0]const u8,
+        complete: *const ClipboardComplete,
         state: *apprt.ClipboardRequest,
-        confirmed: bool,
     ) void {
-        ptr.completeClipboardRequest(
-            std.mem.sliceTo(str, 0),
-            state,
-            confirmed,
-        );
+        ptr.completeClipboardRequest(complete, state);
+    }
+
+    /// Deny a clipboard read request started via the read callback,
+    /// e.g. because the user rejected a confirmation prompt. Request
+    /// types whose protocol expects an answer have their denial reply
+    /// written to the pty. The request pointer is invalidated.
+    export fn ghostty_surface_deny_clipboard_request(
+        ptr: *Surface,
+        state: *apprt.ClipboardRequest,
+    ) void {
+        ptr.denyClipboardRequest(state);
     }
 
     export fn ghostty_surface_inspector(ptr: *Surface) ?*Inspector {

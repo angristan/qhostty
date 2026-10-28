@@ -10,6 +10,7 @@ class KeyEventTranslationTest final : public QObject {
   void normalizesControlLetters();
   void normalizesControlSpace();
   void preservesOrdinaryAndSpecialText();
+  void unshiftsShiftedSymbols();
   void filtersAutoRepeatReleases();
   void mapsLogicalRemappedKeys();
 };
@@ -68,6 +69,26 @@ void KeyEventTranslationTest::preservesOrdinaryAndSpecialText() {
                             Qt::ControlModifier, QString(QChar(0x0d)));
   QCOMPARE(ghosttyUnshiftedCodepoint(ctrlEnter), uint32_t(0));
   QCOMPARE(ghosttyKeyText(ctrlEnter, 0), QByteArray(1, '\r'));
+}
+
+void KeyEventTranslationTest::unshiftsShiftedSymbols() {
+  // Shift+2 on a US layout: Qt reports Key_At with xkb scan code 11.
+  const QKeyEvent at(QEvent::KeyPress, Qt::Key_At, Qt::ShiftModifier, 11, 0x40,
+                     0, QStringLiteral("@"));
+  QCOMPARE(ghosttyUnshiftedCodepoint(at), static_cast<uint32_t>('2'));
+
+  const QKeyEvent rightParen(QEvent::KeyPress, Qt::Key_ParenRight,
+                             Qt::ShiftModifier, 19, 0x29, 0, QStringLiteral(")"));
+  QCOMPARE(ghosttyUnshiftedCodepoint(rightParen), static_cast<uint32_t>('0'));
+
+  const QKeyEvent colon(QEvent::KeyPress, Qt::Key_Colon, Qt::ShiftModifier, 47,
+                        0x3a, 0, QStringLiteral(":"));
+  QCOMPARE(ghosttyUnshiftedCodepoint(colon), static_cast<uint32_t>(';'));
+
+  // Unshifted keys are untouched.
+  const QKeyEvent two(QEvent::KeyPress, Qt::Key_2, Qt::NoModifier, 11, 0x32, 0,
+                      QStringLiteral("2"));
+  QCOMPARE(ghosttyUnshiftedCodepoint(two), static_cast<uint32_t>('2'));
 }
 
 QTEST_APPLESS_MAIN(KeyEventTranslationTest)

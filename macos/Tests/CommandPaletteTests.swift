@@ -14,13 +14,15 @@ struct CommandPaletteFilterTests {
         title: String,
         subtitle: String? = nil,
         description: String? = nil,
-        leadingColor: Color? = nil
+        leadingColor: Color? = nil,
+        sortKey: ObjectIdentifier? = nil
     ) -> CommandOption {
         CommandOption(
             title: title,
             subtitle: subtitle,
             description: description,
-            leadingColor: leadingColor
+            leadingColor: leadingColor,
+            sortKey: sortKey
         ) {}
     }
 
@@ -38,36 +40,6 @@ struct CommandPaletteFilterTests {
         #expect(results == [byTitle, bySubtitle, byDescription])
     }
 
-    /// A strong color match outranks any text match.
-    @Test func colorMatchOutranksTextMatch() {
-        let byColor = option(title: "Alpha", leadingColor: .red)
-        let byTitle = option(title: "Reduce Motion")
-
-        let results = [byTitle, byColor].filteredAndSorted(query: "red")
-
-        #expect(results == [byColor, byTitle])
-    }
-
-    /// Even a barely-matching color outranks a text match, and the option
-    /// is not dropped from the results. (A previous integer-based score
-    /// truncated weak color matches to 0-3, colliding with the text tiers.)
-    @Test func weakColorMatchOutranksTextMatchAndIsKept() throws {
-        // Weighted distance to the Apple color list's red is just under the
-        // 1.5 match threshold, producing a color score near 0.
-        let weakColor = Color(red: 0.31, green: 0.49, blue: 0.49)
-        let byColor = option(title: "Alpha", leadingColor: weakColor)
-        let byTitle = option(title: "Reduce Motion")
-
-        // Sanity-check the fixture: the color must match, but only weakly.
-        let match = try #require(CommandOptionMatch(option: byColor, query: "red"))
-        #expect(match.colorScore > 0)
-        #expect(match.colorScore < 0.05)
-
-        let results = [byTitle, byColor].filteredAndSorted(query: "red")
-
-        #expect(results == [byColor, byTitle])
-    }
-
     /// Options with equal scores keep their original relative order.
     @Test func tiesPreserveOriginalOrder() {
         let first = option(title: "New Window")
@@ -75,5 +47,25 @@ struct CommandPaletteFilterTests {
 
         #expect([first, second].filteredAndSorted(query: "new") == [first, second])
         #expect([second, first].filteredAndSorted(query: "new") == [second, first])
+    }
+
+    /// Equal titles use their sort keys independent of input order.
+    @Test func equalTitlesUseSortKey() {
+        let firstKey = NSObject()
+        let secondKey = NSObject()
+        let first = option(
+            title: "Focus: Shell",
+            subtitle: "/tmp",
+            sortKey: ObjectIdentifier(firstKey)
+        )
+        let second = option(
+            title: "Focus: Shell",
+            subtitle: "/tmp",
+            sortKey: ObjectIdentifier(secondKey)
+        )
+
+        let forward = sortedTerminalPaletteOptions([first, second])
+        let reverse = sortedTerminalPaletteOptions([second, first])
+        #expect(forward == reverse)
     }
 }

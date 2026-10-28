@@ -106,8 +106,8 @@ pub const Descriptor = struct {
         // cleaned up somewhere else.
 
         var copy = self.*;
-        copy.family = if (self.family) |src| try alloc.dupeZ(u8, src) else null;
-        copy.style = if (self.style) |src| try alloc.dupeZ(u8, src) else null;
+        copy.family = if (self.family) |src| try alloc.dupeSentinel(u8, src, 0) else null;
+        copy.style = if (self.style) |src| try alloc.dupeSentinel(u8, src, 0) else null;
         copy.variations = try alloc.dupe(Variation, self.variations);
         return copy;
     }
@@ -136,12 +136,12 @@ pub const Descriptor = struct {
         ));
         if (self.bold) assert(pat.add(
             .weight,
-            .{ .integer = @intFromEnum(fontconfig.Weight.bold) },
+            .{ .integer = @backingInt(fontconfig.Weight.bold) },
             false,
         ));
         if (self.italic) assert(pat.add(
             .slant,
-            .{ .integer = @intFromEnum(fontconfig.Slant.italic) },
+            .{ .integer = @backingInt(fontconfig.Slant.italic) },
             false,
         ));
 
@@ -150,7 +150,7 @@ pub const Descriptor = struct {
         // exclude non-monospace but helps prefer it.
         assert(pat.add(
             .spacing,
-            .{ .integer = @intFromEnum(fontconfig.Spacing.mono) },
+            .{ .integer = @backingInt(fontconfig.Spacing.mono) },
             false,
         ));
 
@@ -331,7 +331,11 @@ pub const Fontconfig = struct {
                 .fc = .{
                     .pattern = font_pattern,
                     .charset = (try font_pattern.get(.charset, 0)).char_set,
-                    .langset = (try font_pattern.get(.lang, 0)).lang_set,
+                    // NOTE: In vast majority of situations this contains a
+                    // `*const LangSet`, but Fontconfig falls back to a simple string
+                    // ("en") if the pattern fails to match any language. Bad bad bad
+                    // bad API design. But we must handle it gracefully here.
+                    .langset = try font_pattern.get(.lang, 0),
                     .variations = self.variations,
                 },
             };
@@ -348,6 +352,22 @@ pub const CoreText = struct {
 
     pub fn deinit(self: *CoreText) void {
         _ = self;
+    }
+
+    /// Warm up the system font registry.
+    ///
+    /// The first CoreText query in a process initializes the system font
+    /// database, which takes multiple milliseconds, while subsequent
+    /// queries are microseconds.
+    pub fn warmup() void {
+        const name = macos.foundation.String.createWithBytes(
+            "AppleColorEmoji",
+            .utf8,
+            false,
+        ) catch return;
+        defer name.release();
+        const ct_font = macos.text.Font.createWithName(name, 12) catch return;
+        ct_font.release();
     }
 
     /// Discover fonts from a descriptor. This returns an iterator that can
@@ -381,6 +401,54 @@ pub const CoreText = struct {
             .variations = desc.variations,
             .i = 0,
         };
+    }
+
+    /// Discover a font by its exact name (family, full, or PostScript
+    /// name). This is significantly faster than `discover` because it
+    /// avoids the system-wide font matching that CTFontCollection does
+    /// (which takes multiple milliseconds). This should be preferred
+    /// when the desired font is known exactly, e.g. system fonts such
+    /// as Apple Color Emoji.
+    ///
+    /// Returns null if no font with this exact family name exists;
+    /// CoreText fallback fonts are never returned.
+    pub fn discoverExactFamily(
+        self: *const CoreText,
+        family: []const u8,
+    ) !?DeferredFace {
+        _ = self;
+
+        const family_str = try macos.foundation.String.createWithBytes(
+            family,
+            .utf8,
+            false,
+        );
+        defer family_str.release();
+
+        // Create our font. We need a size to initialize it so we use size
+        // 12 but we will alter the size later (same as DiscoverIterator).
+        const ct_font = try macos.text.Font.createWithName(family_str, 12);
+
+        // CTFontCreateWithName never returns null: if the requested font
+        // isn't installed it returns a substitute font. Verify we got
+        // the family we asked for, otherwise report not found.
+        const found: bool = found: {
+            const actual = ct_font.copyFamilyName();
+            defer actual.release();
+            var buf: [256]u8 = undefined;
+            const actual_slice = actual.cstring(&buf, .utf8) orelse
+                break :found false;
+            break :found std.mem.eql(u8, actual_slice, family);
+        };
+        if (!found) {
+            ct_font.release();
+            return null;
+        }
+
+        return .{ .ct = .{
+            .font = ct_font,
+            .variations = &.{},
+        } };
     }
 
     pub fn discoverFallback(
@@ -821,7 +889,7 @@ pub const CoreText = struct {
             const fuzzy_type = @TypeOf(self.fuzzy_style);
             self.fuzzy_style = @intCast(style_str.len);
             for (desired_styles) |s| {
-                if (std.ascii.indexOfIgnoreCase(style_str, s) != null) {
+                if (std.ascii.findIgnoreCase(style_str, s) != null) {
                     self.fuzzy_style -|= @intCast(s.len);
                 }
             }
@@ -1028,8 +1096,7 @@ pub const Windows = struct {
                 "SYSTEMROOT",
             ) catch return null;
             defer self.alloc.free(systemroot);
-            return std.fmt.allocPrintSentinel(
-                self.alloc,
+            return self.alloc.printSentinel(
                 "{s}\\Fonts",
                 .{systemroot},
                 0,
@@ -1042,8 +1109,7 @@ pub const Windows = struct {
                 "LOCALAPPDATA",
             ) catch return null;
             defer self.alloc.free(local_appdata);
-            return std.fmt.allocPrintSentinel(
-                self.alloc,
+            return self.alloc.printSentinel(
                 "{s}\\Microsoft\\Windows\\Fonts",
                 .{local_appdata},
                 0,
@@ -1060,11 +1126,12 @@ pub const Windows = struct {
                 .done => return null,
             };
 
-            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const full_path = std.fmt.bufPrintZ(
+            var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const full_path = std.mem.printSentinel(
                 &path_buf,
                 "{s}\\{s}",
                 .{ dir_path, name },
+                0,
             ) catch return null;
 
             const is_ttc = std.ascii.endsWithIgnoreCase(name, ".ttc");
@@ -1107,7 +1174,7 @@ pub const Windows = struct {
             full_path: []const u8,
             face_index: i32,
         ) !DeferredFace {
-            const path_owned = try self.alloc.dupeZ(u8, full_path);
+            const path_owned = try self.alloc.dupeSentinel(u8, full_path, 0);
             errdefer self.alloc.free(path_owned);
 
             const presentation: Presentation =

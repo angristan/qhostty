@@ -354,21 +354,28 @@ bool GhosttyApp::actionCallback(ghostty_app_t app,
   return self != nullptr && self->handleAction(target, action);
 }
 
-bool GhosttyApp::readClipboardCallback(void* userdata,
-                                       ghostty_clipboard_e location,
-                                       void* state) {
+ghostty_clipboard_read_result_e GhosttyApp::readClipboardCallback(
+    void* userdata,
+    ghostty_clipboard_e location,
+    void* state,
+    const char* const* mimes,
+    size_t mimeCount,
+    bool list) {
   auto* widget = static_cast<TerminalWidget*>(userdata);
-  return widget != nullptr && widget->readClipboard(location, state);
+  if (widget == nullptr) {
+    return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE;
+  }
+  return widget->readClipboard(location, state, mimes, mimeCount, list);
 }
 
 void GhosttyApp::confirmReadClipboardCallback(
     void* userdata,
-    const char* contents,
+    const ghostty_clipboard_confirm_s* confirm,
     void* state,
     ghostty_clipboard_request_e request) {
   auto* widget = static_cast<TerminalWidget*>(userdata);
   if (widget != nullptr) {
-    widget->confirmReadClipboard(contents, state, request);
+    widget->confirmReadClipboard(confirm, state, request);
   }
 }
 

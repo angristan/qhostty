@@ -17,7 +17,7 @@ var init_thread: ?std.Thread = null;
 
 /// Directory memory, holds the cache and state dirs persistently. This
 /// prevents any sort of crashes due to initialization races.
-var dir_mem: [std.fs.max_path_bytes * 2]u8 = undefined;
+var dir_mem: [std.Io.Dir.max_path_bytes * 2]u8 = undefined;
 
 /// Holds the XDG cache dir.
 var cache_dir_: ?[]const u8 = null;
@@ -56,14 +56,62 @@ pub threadlocal var thread_state: ?ThreadState = null;
 /// crash reports and logs, but we only store them locally (see Transport).
 /// It is up to the user to grab the logs and manually send them to us
 /// (or to their own Sentry instance) if they want to.
-pub fn init(gpa: Allocator, environ_map: *const std.process.Environ.Map) !void {
-    if (comptime !build_options.sentry) return;
+pub fn init(gpa: Allocator, environ_map: std.process.Environ.Map) !void {
+    if (comptime !build_options.sentry) {
+        var map = environ_map;
+        map.deinit();
+        return;
+    }
 
     // Not supported on Windows currently, doesn't build.
-    if (comptime builtin.os.tag == .windows) return;
+    if (comptime builtin.target.os.tag == .windows) {
+        var map = environ_map;
+        map.deinit();
+        return;
+    }
 
     // Must only start once
     assert(init_thread == null);
+
+    // We use a thread for initializing Sentry because initialization is
+    // slow enough to matter for process startup: resolving our directories
+    // can take multiple milliseconds on macOS (Apple APIs) and Sentry's
+    // own init does disk I/O. Everything Sentry is doing initially is safe
+    // to do on a separate thread and fast enough that its very likely to
+    // be done before a crash occurs.
+    //
+    // The environ map is a snapshot owned by the thread (and freed there),
+    // so it is safe against concurrent mutations of the process environment
+    // (e.g. ensureLocale on the main thread).
+    const thr = std.Thread.spawn(
+        .{},
+        initThread,
+        .{ gpa, environ_map },
+    ) catch |err| {
+        var map = environ_map;
+        map.deinit();
+        return err;
+    };
+
+    // Naming the thread from here only works on some platforms (e.g.
+    // Linux). On Darwin the thread names itself in initThread.
+    var single_threaded: std.Io.Threaded = .init_single_threaded;
+    defer single_threaded.deinit();
+    thr.setName(single_threaded.io(), "sentry-init") catch {};
+
+    init_thread = thr;
+}
+
+fn initThread(gpa: Allocator, environ_map_: std.process.Environ.Map) !void {
+    var environ_map = environ_map_;
+    defer environ_map.deinit();
+
+    // Right now, on Darwin, `std.Thread.setName` can only name the current
+    // thread, and we have no way to get the current thread from within it,
+    // so instead we use this code to name the thread instead.
+    if (builtin.target.os.tag.isDarwin()) {
+        internal_os.macos.pthread_setname_np(&"sentry-init".*);
+    }
 
     // Get our directories.
     var single_threaded: std.Io.Threaded = .init_single_threaded;
@@ -71,44 +119,27 @@ pub fn init(gpa: Allocator, environ_map: *const std.process.Environ.Map) !void {
     var fba: std.heap.FixedBufferAllocator = .init(&dir_mem);
 
     state_dir_ = state_dir: {
-        const dir = try crash.defaultDir(single_threaded.io(), gpa, environ_map);
+        const dir = try crash.defaultDir(
+            single_threaded.io(),
+            gpa,
+            &environ_map,
+        );
         defer gpa.free(dir.path);
         break :state_dir try fba.allocator().dupe(u8, dir.path);
     };
     errdefer state_dir_ = null;
 
     const cache_dir = cache_dir: {
-        const dir = try cacheDir(single_threaded.io(), gpa, environ_map);
+        const dir = try cacheDir(
+            single_threaded.io(),
+            gpa,
+            &environ_map,
+        );
         defer gpa.free(dir);
         break :cache_dir try fba.allocator().dupe(u8, dir);
     };
     cache_dir_ = cache_dir;
     errdefer cache_dir_ = null;
-
-    // We use a thread for initializing Sentry because initialization takes
-    // ~2k ns on my M3 Max. That's not a LOT of time but it's enough to be
-    // 90% of our pre-App startup time. Everything Sentry is doing initially
-    // is safe to do on a separate thread and fast enough that its very
-    // likely to be done before a crash occurs.
-    const thr = try std.Thread.spawn(
-        .{},
-        initThread,
-        .{cache_dir},
-    );
-
-    thr.setName(single_threaded.io(), "sentry-init") catch {};
-    init_thread = thr;
-}
-
-fn initThread(cache_dir: []const u8) !void {
-    if (comptime !build_options.sentry) return;
-
-    // Right now, on Darwin, `std.Thread.setName` can only name the current
-    // thread, and we have no way to get the current thread from within it,
-    // so instead we use this code to name the thread instead.
-    if (builtin.os.tag.isDarwin()) {
-        internal_os.macos.pthread_setname_np(&"sentry-init".*);
-    }
 
     const transport = sentry.Transport.init(&Transport.send);
     // This will crash if the transport was never used so we avoid
@@ -136,7 +167,7 @@ fn initThread(cache_dir: []const u8) !void {
         cache_dir.len,
     );
 
-    if (comptime builtin.mode == .Debug) {
+    if (comptime builtin.mode == .debug) {
         // Debug logging for Sentry
         sentry.c.sentry_options_set_debug(opts, @intFromBool(true));
     }
@@ -158,7 +189,7 @@ fn cacheDir(io: std.Io, alloc: Allocator, environ_map: *const std.process.Enviro
     // On macOS, we prefer to use the NSCachesDirectory value to be
     // a more idiomatic macOS application. But if XDG env vars are set
     // we will respect them.
-    if (comptime builtin.os.tag == .macos) macos: {
+    if (comptime builtin.target.os.tag == .macos) macos: {
         const xdg_cache_home = environ_map.get("XDG_CACHE_HOME") orelse break :macos;
         if (xdg_cache_home.len > 0) {
             return try internal_os.macos.cacheDir(
@@ -181,7 +212,7 @@ fn cacheDir(io: std.Io, alloc: Allocator, environ_map: *const std.process.Enviro
 pub fn deinit() void {
     if (comptime !build_options.sentry) return;
 
-    if (comptime builtin.os.tag == .windows) return;
+    if (comptime builtin.target.os.tag == .windows) return;
 
     // If we're still initializing then wait for init to finish. This
     // is highly unlikely since init is a very fast operation but we want
@@ -319,7 +350,7 @@ pub const Transport = struct {
         // Build our final path and write to it.
         const path = try std.fs.path.join(alloc, &.{
             state_dir,
-            try std.fmt.allocPrint(alloc, "{s}.ghosttycrash", .{uuid.string()}),
+            try alloc.print("{s}.ghosttycrash", .{uuid.string()}),
         });
         const file = try std.Io.Dir.cwd().createFile(single_threaded.io(), path, .{});
         defer file.close(single_threaded.io());

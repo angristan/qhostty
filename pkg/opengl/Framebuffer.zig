@@ -1,7 +1,7 @@
 const Framebuffer = @This();
 
 const std = @import("std");
-const c = @import("c.zig").c;
+const c = @import("opengl_c");
 const errors = @import("errors.zig");
 const glad = @import("glad.zig");
 const Texture = @import("Texture.zig");
@@ -21,17 +21,12 @@ pub fn destroy(v: Framebuffer) void {
 }
 
 pub fn bind(v: Framebuffer, target: Target) !Binding {
-    // The default framebuffer is not necessarily zero. Read and draw targets
-    // can also differ, notably when rendering through QOpenGLWidget.
-    const binding: c.GLenum = switch (target) {
-        .framebuffer => c.GL_FRAMEBUFFER_BINDING,
-        .draw => c.GL_DRAW_FRAMEBUFFER_BINDING,
-        .read => c.GL_READ_FRAMEBUFFER_BINDING,
-        else => c.GL_FRAMEBUFFER_BINDING,
-    };
+    // The default framebuffer is documented as being zero but
+    // on multiple OpenGL drivers its not zero, so we grab it
+    // at runtime.
     var current: c.GLint = undefined;
-    glad.context.GetIntegerv.?(binding, &current);
-    glad.context.BindFramebuffer.?(@intFromEnum(target), v.id);
+    glad.context.GetIntegerv.?(c.GL_FRAMEBUFFER_BINDING, &current);
+    glad.context.BindFramebuffer.?(@backingInt(target), v.id);
     return .{ .target = target, .previous = @intCast(current) };
 }
 
@@ -70,7 +65,7 @@ pub const Binding = struct {
 
     pub fn unbind(self: Binding) void {
         glad.context.BindFramebuffer.?(
-            @intFromEnum(self.target),
+            @backingInt(self.target),
             self.previous,
         );
     }
@@ -83,9 +78,9 @@ pub const Binding = struct {
         level: c.GLint,
     ) !void {
         glad.context.FramebufferTexture2D.?(
-            @intFromEnum(self.target),
-            @intFromEnum(attachment),
-            @intFromEnum(textarget),
+            @backingInt(self.target),
+            @backingInt(attachment),
+            @backingInt(textarget),
             texture.id,
             level,
         );
@@ -98,8 +93,8 @@ pub const Binding = struct {
         buffer: Renderbuffer,
     ) !void {
         glad.context.FramebufferRenderbuffer.?(
-            @intFromEnum(self.target),
-            @intFromEnum(attachment),
+            @backingInt(self.target),
+            @backingInt(attachment),
             c.GL_RENDERBUFFER,
             buffer.id,
         );
@@ -116,6 +111,6 @@ pub const Binding = struct {
     }
 
     pub fn checkStatus(self: Binding) Status {
-        return @enumFromInt(glad.context.CheckFramebufferStatus.?(@intFromEnum(self.target)));
+        return @fromBackingInt(glad.context.CheckFramebufferStatus.?(@backingInt(self.target)));
     }
 };

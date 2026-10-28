@@ -32,8 +32,8 @@ pub const Command = struct {
     pub fn clone(self: *const Command, alloc: Allocator) Allocator.Error!Command {
         return .{
             .action = try self.action.clone(alloc),
-            .title = try alloc.dupeZ(u8, self.title),
-            .description = try alloc.dupeZ(u8, self.description),
+            .title = try alloc.dupeSentinel(u8, self.title, 0),
+            .description = try alloc.dupeSentinel(u8, self.description, 0),
         };
     }
 
@@ -98,15 +98,15 @@ pub const defaults: []const Command = defaults: {
     @setEvalBranchQuota(100_000);
 
     var count: usize = 0;
-    for (@typeInfo(Action.Key).@"enum".fields) |field| {
-        const action = @field(Action.Key, field.name);
+    for (@typeInfo(Action.Key).@"enum".field_names) |field| {
+        const action = @field(Action.Key, field);
         count += actionCommands(action).len;
     }
 
     var result: [count]Command = undefined;
     var i: usize = 0;
-    for (@typeInfo(Action.Key).@"enum".fields) |field| {
-        const action = @field(Action.Key, field.name);
+    for (@typeInfo(Action.Key).@"enum".field_names) |field| {
+        const action = @field(Action.Key, field);
         const commands = actionCommands(action);
         for (commands) |cmd| {
             result[i] = cmd;
@@ -441,6 +441,12 @@ fn actionCommands(action: Action.Key) []const Command {
             },
         },
 
+        .move_tab_to_new_window => comptime &.{.{
+            .action = .move_tab_to_new_window,
+            .title = i18n.N_("Move Tab to New Window"),
+            .description = i18n.N_("Move the current tab to a new window."),
+        }},
+
         .toggle_tab_overview => comptime &.{.{
             .action = .toggle_tab_overview,
             .title = i18n.N_("Toggle Tab Overview"),
@@ -457,6 +463,12 @@ fn actionCommands(action: Action.Key) []const Command {
             .action = .prompt_tab_title,
             .title = i18n.N_("Change Tab Title…"),
             .description = i18n.N_("Prompt for a new title for the current tab."),
+        }},
+
+        .prompt_window_title => comptime &.{.{
+            .action = .prompt_window_title,
+            .title = "Change Window Title…",
+            .description = "Prompt for a new title for the current window.",
         }},
 
         .new_split => comptime &.{
@@ -570,11 +582,18 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = i18n.N_("Show the on-screen keyboard if present."),
         }},
 
-        .open_config => comptime &.{.{
-            .action = .open_config,
-            .title = i18n.N_("Open Config"),
-            .description = i18n.N_("Open the config file."),
-        }},
+        .open_config => comptime &.{
+            .{
+                .action = .{ .open_config = .os_open },
+                .title = i18n.N_("Open Config Using OS editor"),
+                .description = i18n.N_("Open the config file with the OS's default editor."),
+            },
+            .{
+                .action = .{ .open_config = .new_window },
+                .title = i18n.N_("Open Config in New Terminal Window"),
+                .description = i18n.N_("Open the config file in a new window using $EDITOR or $VISUAL."),
+            },
+        },
 
         .reload_config => comptime &.{.{
             .action = .reload_config,
@@ -700,6 +719,7 @@ fn actionCommands(action: Action.Key) []const Command {
         .set_font_size,
         .set_surface_title,
         .set_tab_title,
+        .set_window_title,
         .search,
         .scroll_to_row,
         .scroll_page_fractional,

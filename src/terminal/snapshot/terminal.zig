@@ -206,7 +206,8 @@
 //! bit 39  report_color_scheme
 //! bit 40  report_visibility
 //! bit 41  in_band_size_reports
-//! bits 42-63  reserved, zero
+//! bit 42  kitty_paste_events
+//! bits 43-63  reserved, zero
 //! ```
 //!
 //! This is the packed field order of native `ModePacked`. Its layout is
@@ -438,11 +439,11 @@ pub const Header = struct {
         try io.writeInt(writer, u16, self.scrolling_region_right);
 
         // Status display, screen routing, and character context.
-        try writer.writeByte(@intCast(@intFromEnum(self.status_display)));
+        try writer.writeByte(@intCast(@backingInt(self.status_display)));
         try io.writeInt(
             writer,
             u16,
-            @intCast(@intFromEnum(self.active_screen_key)),
+            @intCast(@backingInt(self.active_screen_key)),
         );
         try io.writeInt(writer, u16, self.screen_count);
         try io.writeInt(
@@ -457,20 +458,20 @@ pub const Header = struct {
         // Cursor presentation defaults shared by the screens.
         try writer.writeByte(@intFromBool(self.cursor_is_default));
         try writer.writeByte(
-            @intCast(@intFromEnum(self.cursor_default_style)),
+            @intCast(@backingInt(self.cursor_default_style)),
         );
         try writer.writeByte(encodeOptionalBool(self.cursor_default_blink));
 
         // Terminal input, semantic redraw, and pointer behavior.
-        try writer.writeByte(@intCast(@intFromEnum(self.shell_redraw)));
+        try writer.writeByte(@intCast(@backingInt(self.shell_redraw)));
         try writer.writeByte(@intFromBool(self.modify_other_keys_2));
-        try writer.writeByte(@intCast(@intFromEnum(self.mouse_event)));
-        try writer.writeByte(@intCast(@intFromEnum(self.mouse_format)));
+        try writer.writeByte(@intCast(@backingInt(self.mouse_event)));
+        try writer.writeByte(@intCast(@backingInt(self.mouse_format)));
         try writer.writeByte(encodeOptionalBool(self.mouse_shift_capture));
-        try writer.writeByte(@intCast(@intFromEnum(self.mouse_shape)));
+        try writer.writeByte(@intCast(@backingInt(self.mouse_shape)));
         try writer.writeByte(@intFromBool(self.password_input));
 
-        // Runtime, saved, and reset mode sets. ModePacked occupies 41 bits;
+        // Runtime, saved, and reset mode sets. ModePacked occupies 43 bits;
         // its eight-byte wire slots zero-extend the native packed value.
         const mode_values = [_]terminal_modes.ModePacked{
             self.current_modes,
@@ -760,7 +761,7 @@ pub const Header = struct {
 
 /// Allocator-owned semantic state decoded from one TERMINAL payload.
 ///
-/// The palette and fixed header are values. `tabstops`, `pwd`, and `title`
+/// The fixed header is a value. `tabstops`, `palette`, `pwd`, and `title`
 /// own allocations and are released by `deinit`.
 const DecodedPayload = struct {
     header: Header,
@@ -771,6 +772,7 @@ const DecodedPayload = struct {
 
     fn deinit(self: *DecodedPayload, alloc: Allocator) void {
         self.tabstops.deinit(alloc);
+        self.palette.deinit(alloc);
         alloc.free(self.pwd);
         alloc.free(self.title);
         self.* = undefined;
@@ -873,7 +875,8 @@ fn decodePayload(
     var override_mask: [32]u8 = undefined;
     try reader.readSliceAll(&override_mask);
 
-    var palette: terminal_color.DynamicPalette = .init(original);
+    var palette: terminal_color.DynamicPalette = try .init(alloc, original);
+    errdefer palette.deinit(alloc);
     for (0..256) |index| {
         const mask = @as(u8, 1) << @intCast(index % 8);
         if (override_mask[index / 8] & mask != 0) {
@@ -932,10 +935,9 @@ pub fn encode(
 
 /// Errors possible while decoding one native TERMINAL record.
 pub const DecodeError = PayloadDecodeError ||
-    record.Reader.InitError ||
     record.Reader.FinishError ||
     error{
-        /// The next record is valid but is not a TERMINAL.
+        /// The record is valid but is not a TERMINAL.
         UnexpectedRecordTag,
     };
 
@@ -945,15 +947,19 @@ pub const DecodeError = PayloadDecodeError ||
 /// primary and optional alternate screens with the declared routing. Later
 /// SCREEN records replace those screens in place. On failure, all decoded and
 /// partially initialized native state is released.
+///
+/// `record_header` is the record's header, already read from `source`. See
+/// "Decoding Records" in `record.zig`.
 pub fn decode(
     source: *std.Io.Reader,
+    record_header: record.Header,
     io_: std.Io,
     alloc: Allocator,
 ) DecodeError!Terminal {
     // Finish the complete record before constructing native terminal state.
     var payload: DecodedPayload = payload: {
         var record_reader: record.Reader = undefined;
-        try record_reader.init(source);
+        record_reader.initHeader(source, record_header);
         if (record_reader.header.tag != .terminal) {
             return error.UnexpectedRecordTag;
         }
@@ -974,7 +980,7 @@ pub fn decode(
     );
 
     // Terminal.init establishes native pools, pins, defaults, and ownership.
-    var result = try Terminal.init(io_, alloc, .{
+    var result = Terminal.init(io_, alloc, .{
         .cols = header.columns,
         .rows = header.rows,
         .max_scrollback_bytes = max_scrollback_bytes,
@@ -988,8 +994,17 @@ pub fn decode(
         .default_modes = header.default_modes,
         .default_cursor_style = header.cursor_default_style,
         .default_cursor_blink = header.cursor_default_blink,
-    });
+    }) catch |err| switch (err) {
+        // Header.decode already rejects zero dimensions, so this should
+        // not happen. Map it to our own error to keep DecodeError exact.
+        error.InvalidValue => return error.InvalidDimensions,
+        else => |e| return e,
+    };
     errdefer result.deinit(alloc);
+
+    // The terminal owns the decoded palette now, so the payload must not
+    // release it.
+    payload.palette = .default;
 
     // Recreate the optional screen now so ScreenSet routing is complete before
     // its empty screens are replaced by the following SCREEN records.
@@ -1203,7 +1218,7 @@ const test_header_fixture = test_fixture.parse(
 
 test "TERMINAL mode bit layout" {
     try std.testing.expectEqual(
-        @as(usize, 42),
+        @as(usize, 43),
         @bitSizeOf(terminal_modes.ModePacked),
     );
 
@@ -1212,8 +1227,8 @@ test "TERMINAL mode bit layout" {
     );
     first.disable_keyboard = true;
     try std.testing.expectEqual(
-        @as(u42, 1) << 0,
-        @as(u42, @bitCast(first)),
+        @as(u43, 1) << 0,
+        @as(u43, @bitCast(first)),
     );
 
     var visibility: terminal_modes.ModePacked = std.mem.zeroes(
@@ -1221,17 +1236,26 @@ test "TERMINAL mode bit layout" {
     );
     visibility.report_visibility = true;
     try std.testing.expectEqual(
-        @as(u42, 1) << 40,
-        @as(u42, @bitCast(visibility)),
+        @as(u43, 1) << 40,
+        @as(u43, @bitCast(visibility)),
+    );
+
+    var size_reports: terminal_modes.ModePacked = std.mem.zeroes(
+        terminal_modes.ModePacked,
+    );
+    size_reports.in_band_size_reports = true;
+    try std.testing.expectEqual(
+        @as(u43, 1) << 41,
+        @as(u43, @bitCast(size_reports)),
     );
 
     var last: terminal_modes.ModePacked = std.mem.zeroes(
         terminal_modes.ModePacked,
     );
-    last.in_band_size_reports = true;
+    last.kitty_paste_events = true;
     try std.testing.expectEqual(
-        @as(u42, 1) << 41,
-        @as(u42, @bitCast(last)),
+        @as(u43, 1) << 42,
+        @as(u43, @bitCast(last)),
     );
 }
 
@@ -1435,9 +1459,7 @@ test "TERMINAL payload round trip" {
     tabstops.set(test_header.columns - 1);
 
     // Use overrides at both ends of the palette to make ordering explicit.
-    var palette: terminal_color.DynamicPalette = .init(
-        terminal_color.default,
-    );
+    var palette: terminal_color.DynamicPalette = .default;
     palette.set(0, .{ .r = 1, .g = 2, .b = 3 });
     palette.set(255, .{ .r = 4, .g = 5, .b = 6 });
 
@@ -1502,9 +1524,7 @@ test "TERMINAL payload rejects noncanonical state" {
         0,
     );
     defer tabstops.deinit(testing.allocator);
-    var palette: terminal_color.DynamicPalette = .init(
-        terminal_color.default,
-    );
+    var palette: terminal_color.DynamicPalette = .default;
     var encoded: [2048]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&encoded);
     try testing.expectError(
@@ -1547,9 +1567,7 @@ test "TERMINAL payload ignores tab-stop padding" {
         0,
     );
     defer tabstops.deinit(testing.allocator);
-    var palette: terminal_color.DynamicPalette = .init(
-        terminal_color.default,
-    );
+    var palette: terminal_color.DynamicPalette = .default;
     palette.set(1, .{ .r = 1, .g = 2, .b = 3 });
 
     var destination: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -1647,6 +1665,7 @@ test "TERMINAL record encodes native terminal state" {
     var source: std.Io.Reader = .fixed(destination.written());
     var restored = try decode(
         &source,
+        try record.nextHeader(&source),
         testing.io,
         testing.allocator,
     );
@@ -1728,6 +1747,7 @@ test "TERMINAL record declares an initialized alternate screen" {
     var source: std.Io.Reader = .fixed(destination.written());
     var restored = try decode(
         &source,
+        try record.nextHeader(&source),
         testing.io,
         testing.allocator,
     );
@@ -1793,7 +1813,12 @@ test "TERMINAL record decoding rejects malformed input transactionally" {
     var wrong_tag_source: std.Io.Reader = .fixed(wrong_tag.written());
     try testing.expectError(
         error.UnexpectedRecordTag,
-        decode(&wrong_tag_source, testing.io, testing.allocator),
+        decode(
+            &wrong_tag_source,
+            try record.nextHeader(&wrong_tag_source),
+            testing.io,
+            testing.allocator,
+        ),
     );
 
     // Build one canonical record for exhaustive truncation and allocation
@@ -1819,8 +1844,10 @@ test "TERMINAL record decoding rejects malformed input transactionally" {
         var source: std.Io.Reader = .fixed(
             encoded.written()[0..fixture_len],
         );
+        const header = record.nextHeader(&source) catch continue;
         var restored = decode(
             &source,
+            header,
             testing.io,
             testing.allocator,
         ) catch continue;
@@ -1835,6 +1862,11 @@ test "TERMINAL record decoding rejects malformed input transactionally" {
     var failing_source: std.Io.Reader = .fixed(encoded.written());
     try testing.expectError(
         error.OutOfMemory,
-        decode(&failing_source, testing.io, failing.allocator()),
+        decode(
+            &failing_source,
+            try record.nextHeader(&failing_source),
+            testing.io,
+            failing.allocator(),
+        ),
     );
 }

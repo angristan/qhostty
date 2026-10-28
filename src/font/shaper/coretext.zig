@@ -361,7 +361,7 @@ pub const Shaper = struct {
         // Make room for the attributed string, CTTypesetter, and CTLine.
         try self.cf_release_pool.ensureUnusedCapacity(self.alloc, 4);
 
-        const str = macos.foundation.String.createWithCharactersNoCopy(state.unichars.items);
+        const str = try macos.foundation.String.createWithCharactersNoCopy(state.unichars.items);
         self.cf_release_pool.appendAssumeCapacity(str);
 
         // Create an attributed string from our string
@@ -381,7 +381,7 @@ pub const Shaper = struct {
         self.cf_release_pool.appendAssumeCapacity(typesetter);
 
         // Create a line from the typesetter
-        const line = typesetter.createLine(.{ .location = 0, .length = 0 });
+        const line = try typesetter.createLine(.{ .location = 0, .length = 0 });
         self.cf_release_pool.appendAssumeCapacity(line);
 
         // This keeps track of the current x offset (sum of advance.width) and
@@ -654,16 +654,16 @@ pub const Shaper = struct {
             const state = &self.shaper.run_state;
 
             // Build our UTF-16 string for CoreText
-            try state.unichars.ensureUnusedCapacity(self.shaper.alloc, 2);
-
-            state.unichars.appendNTimesAssumeCapacity(0, 2);
-
-            const pair = macos.foundation.stringGetSurrogatePairForLongCharacter(
-                cp,
-                state.unichars.items[state.unichars.items.len - 2 ..][0..2],
-            );
-            if (!pair) {
-                state.unichars.items.len -= 1;
+            const pair = cp > 0xFFFF;
+            if (pair) {
+                try state.unichars.ensureUnusedCapacity(self.shaper.alloc, 2);
+                state.unichars.appendNTimesAssumeCapacity(0, 2);
+                _ = macos.foundation.stringGetSurrogatePairForLongCharacter(
+                    cp,
+                    state.unichars.items[state.unichars.items.len - 2 ..][0..2],
+                );
+            } else {
+                try state.unichars.append(self.shaper.alloc, @intCast(cp));
             }
 
             // Build our reverse lookup table for codepoints to clusters

@@ -6,6 +6,7 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui Network Widgets OpenGL OpenGLWidgets)
+find_package(OpenGL REQUIRED COMPONENTS EGL)
 find_package(LayerShellQt QUIET)
 find_package(KF6WindowSystem QUIET)
 find_package(KF6GlobalAccel QUIET)
@@ -51,6 +52,7 @@ target_link_libraries(qhostty_frontend PUBLIC
   Qt6::Widgets
   Qt6::OpenGL
   Qt6::OpenGLWidgets
+  OpenGL::EGL
 )
 if(TARGET LayerShellQt::Interface)
   target_link_libraries(qhostty_frontend PRIVATE LayerShellQt::Interface)

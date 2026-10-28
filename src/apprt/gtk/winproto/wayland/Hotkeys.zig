@@ -40,7 +40,7 @@ const Entry = struct {
         const keysym = key.keysymFromTrigger(self.trigger) orelse unreachable;
 
         var desc_buf: [256]u8 = undefined;
-        const desc = std.fmt.bufPrintZ(&desc_buf, "{f}", .{self.action}) catch "";
+        const desc = std.mem.printSentinel(&desc_buf, "{f}", .{self.action}, 0) catch "";
 
         const hotkey = try manager.bind(
             keysym,
@@ -75,14 +75,15 @@ const Entry = struct {
 pub fn init(alloc: Allocator, app_id: [:0]const u8) Allocator.Error!Hotkeys {
     return .{
         .alloc = alloc,
-        .app_id = try alloc.dupeZ(u8, app_id),
+        .app_id = try alloc.dupeSentinel(u8, app_id, 0),
     };
 }
 
 /// Must leave the entries in a valid empty state: clear may still be
 /// called after deinit during application teardown.
 pub fn deinit(self: *Hotkeys) void {
-    self.clear();
+    for (self.entries.items) |*entry| entry.deinit();
+    self.entries.clearAndFree(self.alloc);
     self.alloc.free(self.app_id);
 }
 

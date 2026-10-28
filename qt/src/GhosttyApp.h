@@ -46,13 +46,18 @@ class GhosttyApp final : public QObject {
   static bool actionCallback(ghostty_app_t app,
                              ghostty_target_s target,
                              ghostty_action_s action);
-  static bool readClipboardCallback(void* userdata,
-                                    ghostty_clipboard_e location,
-                                    void* state);
-  static void confirmReadClipboardCallback(void* userdata,
-                                           const char* contents,
-                                           void* state,
-                                           ghostty_clipboard_request_e request);
+  static ghostty_clipboard_read_result_e readClipboardCallback(
+      void* userdata,
+      ghostty_clipboard_e location,
+      void* state,
+      const char* const* mimes,
+      size_t mimeCount,
+      bool list);
+  static void confirmReadClipboardCallback(
+      void* userdata,
+      const ghostty_clipboard_confirm_s* confirm,
+      void* state,
+      ghostty_clipboard_request_e request);
   static void writeClipboardCallback(
       void* userdata,
       ghostty_clipboard_e location,

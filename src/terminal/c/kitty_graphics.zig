@@ -10,6 +10,7 @@ const grid_ref = @import("grid_ref.zig");
 const selection_c = @import("selection.zig");
 const terminal_c = @import("terminal.zig");
 const Terminal = @import("../Terminal.zig");
+const PageList = @import("../PageList.zig");
 const Result = @import("result.zig").Result;
 
 /// C: GhosttyKittyGraphics
@@ -196,6 +197,30 @@ pub const ImageData = enum(c_int) {
     }
 };
 
+pub fn animation_tick(
+    graphics_: KittyGraphics,
+    now_ms: u64,
+    next_ms: ?*u64,
+) callconv(lib.calling_conv) Result {
+    if (comptime !build_options.kitty_graphics) return .no_value;
+
+    const out = next_ms orelse return .invalid_value;
+    const storage = graphics_;
+
+    // The tick needs an Io only to hand out new generation numbers.
+    // The storage handle doesn't carry one, but TinyIo has no state,
+    // so a fresh one works just as well as the terminal's.
+    const delay = storage.animationTick(
+        terminal_c.Io.init.io(),
+        now_ms,
+    ) orelse return .no_value;
+    // The Zig tick returns a delay. The C API returns the absolute
+    // time instead, so callers don't have to remember when they
+    // called.
+    out.* = now_ms +| delay;
+    return .success;
+}
+
 pub fn image_get_handle(
     graphics_: KittyGraphics,
     image_id: u32,
@@ -261,8 +286,11 @@ fn imageGetTyped(
         .height => out.* = image.height,
         .format => out.* = image.format,
         .compression => out.* = image.compression,
-        .data_ptr => out.* = (image.data.bytes() orelse return .no_value).ptr,
-        .data_len => out.* = image.data.len(),
+        // For animated images this is the current animation frame's
+        // data; the image generation changes whenever the current
+        // frame does, so generation-keyed caches stay coherent.
+        .data_ptr => out.* = (image.renderData().bytes() orelse return .no_value).ptr,
+        .data_len => out.* = image.renderData().len(),
         .generation => out.* = image.generation,
     }
 
@@ -301,7 +329,7 @@ pub fn placement_iterator_set(
     if (comptime !build_options.kitty_graphics) return .no_value;
 
     if (comptime std.debug.runtime_safety) {
-        _ = std.enums.fromInt(PlacementIteratorOption, @intFromEnum(option)) orelse {
+        _ = std.enums.fromInt(PlacementIteratorOption, @backingInt(option)) orelse {
             return .invalid_value;
         };
     }
@@ -516,16 +544,12 @@ pub fn placement_source_rect(
     const entry = iter.entry orelse return .invalid_value;
     const p = entry.value_ptr;
 
-    // Apply "0 = full image dimension" convention, then clamp to image bounds.
-    const x = @min(p.source_x, image.width);
-    const y = @min(p.source_y, image.height);
-    const w = @min(if (p.source_width > 0) p.source_width else image.width, image.width - x);
-    const h = @min(if (p.source_height > 0) p.source_height else image.height, image.height - y);
+    const source = p.sourceRect(image.*);
 
-    out_x.* = x;
-    out_y.* = y;
-    out_width.* = w;
-    out_height.* = h;
+    out_x.* = source.x;
+    out_y.* = source.y;
+    out_width.* = source.width;
+    out_height.* = source.height;
 
     return .success;
 }
@@ -576,17 +600,18 @@ pub fn placement_render_info(
     out.viewport_row = vp.row;
     out.viewport_visible = vp.visible;
 
-    const x = @min(p.source_x, image.width);
-    const y = @min(p.source_y, image.height);
-    out.source_x = x;
-    out.source_y = y;
-    out.source_width = @min(if (p.source_width > 0) p.source_width else image.width, image.width - x);
-    out.source_height = @min(if (p.source_height > 0) p.source_height else image.height, image.height - y);
+    const source = p.sourceRect(image.*);
+    out.source_x = source.x;
+    out.source_y = source.y;
+    out.source_width = source.width;
+    out.source_height = source.height;
 
     return .success;
 }
 
-/// Compute viewport-relative position of a placement.
+/// Compute viewport-relative position of a placement, for the C API
+/// functions that inspect the storage. Drawing doesn't use this. The
+/// render state positions placements on its own.
 ///
 /// Converts the placement's internal pin to viewport-relative column
 /// and row coordinates by getting screen-absolute coordinates for
@@ -604,11 +629,35 @@ fn computeViewportPos(
     t: *Terminal,
 ) struct { col: i32, row: i32, visible: bool } {
     // Virtual placements use unicode placeholders and don't have a
-    // screen position — they are rendered inline by the text layout.
-    const pin = switch (p.location) {
-        .pin => |pin| pin,
+    // screen position of their own. Relative placements are anchored at
+    // the root of their parent chain, offset by the accumulated chain
+    // offsets. A chain rooted at a virtual placement has no resolvable
+    // position here: its origin is the parent's placeholder cells, which
+    // the render state finds while it scans the captured rows.
+    const origin: struct {
+        pin: *const PageList.Pin,
+        col_offset: i32 = 0,
+        row_offset: i32 = 0,
+    } = switch (p.location) {
+        .pin => |pin| .{ .pin = pin },
         .virtual => return .{ .col = 0, .row = 0, .visible = false },
+        .relative => |rel| origin: {
+            const storage = &t.screens.active.kitty_images;
+            const chain = storage.resolveChain(rel) orelse
+                return .{ .col = 0, .row = 0, .visible = false };
+            switch (chain.root.location) {
+                .pin => |root_pin| break :origin .{
+                    .pin = root_pin,
+                    .col_offset = chain.horizontal_offset,
+                    .row_offset = chain.vertical_offset,
+                },
+                .virtual => return .{ .col = 0, .row = 0, .visible = false },
+                .relative => unreachable, // resolveChain roots are never relative
+            }
+        },
     };
+
+    const pin = origin.pin;
     if (pin.garbage) return .{ .col = 0, .row = 0, .visible = false };
 
     // Convert both the placement's pin and the viewport's top-left
@@ -623,22 +672,30 @@ fn computeViewportPos(
 
     // Subtracting viewport origin from the pin gives us viewport-
     // relative coordinates. The row can be negative when the
-    // placement has partially scrolled above the viewport.
-    const vp_row: i32 = @as(i32, @intCast(pin_screen.screen.y)) -
-        @as(i32, @intCast(vp_screen.screen.y));
-    const vp_col: i32 = @intCast(pin_screen.screen.x);
+    // placement has partially scrolled above the viewport, and both
+    // can be negative for relative placements with negative offsets.
+    const vp_row: i32 = (@as(i32, @intCast(pin_screen.screen.y)) -
+        @as(i32, @intCast(vp_screen.screen.y))) +| origin.row_offset;
+    const vp_col: i32 = @as(i32, @intCast(pin_screen.screen.x)) +|
+        origin.col_offset;
 
-    // A placement is invisible if its bottom edge (row + height)
-    // is above the viewport, or its top edge is at or below the
-    // viewport's last row.
+    // A placement is invisible if its bottom edge (row + height) is
+    // above the viewport, or its top edge is at or below the viewport's
+    // last row. The same applies horizontally: a pin's column is always
+    // in bounds, but a relative placement's offsets can push it fully
+    // off either side.
     const grid_size = p.gridSize(image.*, t);
     const bottom_row = @as(i64, vp_row) + @as(i64, grid_size.rows);
-    const visible = bottom_row > 0 and vp_row < @as(i32, t.rows);
+    const right_col = @as(i64, vp_col) + @as(i64, grid_size.cols);
+    const visible = bottom_row > 0 and vp_row < @as(i32, t.rows) and
+        right_col > 0 and vp_col < @as(i32, t.cols);
 
     return .{ .col = vp_col, .row = vp_row, .visible = visible };
 }
 
 test "placement_iterator new/free" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
     var iter: PlacementIterator = null;
     try testing.expectEqual(Result.success, placement_iterator_new(
         &lib.alloc.test_allocator,
@@ -1033,7 +1090,8 @@ test "image_get exposes pending metadata without a data pointer" {
     var data_ptr: [*]const u8 = undefined;
     try testing.expectEqual(Result.no_value, image_get(img, .data_ptr, @ptrCast(&data_ptr)));
 
-    const pixels = try alloc.dupe(u8, "*" ** 12);
+    const pixels = try alloc.alloc(u8, 12);
+    @memset(pixels, '*');
     try testing.expect(pending.complete(graphics, testing.io, pixels));
     const completed_img = image_get_handle(graphics, 42);
     try testing.expect(completed_img != null);
@@ -1565,6 +1623,15 @@ test "placement_source_rect clamps to image bounds" {
     try testing.expectEqual(3, y);
     try testing.expectEqual(1, w);
     try testing.expectEqual(1, h);
+
+    var pixel_width: u32 = undefined;
+    var pixel_height: u32 = undefined;
+    try testing.expectEqual(
+        Result.success,
+        placement_pixel_size(iter, img, t, &pixel_width, &pixel_height),
+    );
+    try testing.expectEqual(1, pixel_width);
+    try testing.expectEqual(1, pixel_height);
 }
 
 test "placement_source_rect null args return invalid_value" {
@@ -1626,7 +1693,7 @@ test "placement_render_info returns all fields" {
     const entry = iter.?.entry.?;
     const pin = switch (entry.value_ptr.location) {
         .pin => |pin| pin,
-        .virtual => unreachable,
+        .virtual, .relative => unreachable,
     };
     pin.garbage = true;
 
@@ -2094,4 +2161,126 @@ test "generation never recurs across resets and screen switches" {
     try testing.expectEqual(Result.success, terminal_c.get(t, .kitty_graphics, @ptrCast(&graphics)));
     try testing.expectEqual(Result.success, get(graphics, .generation, @ptrCast(&gen)));
     try testing.expect(gen > gen_alt);
+}
+
+test "animation_tick advances a running animation" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    var t: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer terminal_c.free(t);
+
+    // Place a red 1x1 RGBA image and add a blue second frame that
+    // shows for 40ms. The first frame starts with no display time,
+    // so give it 30ms. Then start looping playback.
+    const cmds = "\x1b_Ga=T,f=32,i=1,s=1,v=1,c=1,r=1;/wAA/w==\x1b\\" ++
+        "\x1b_Ga=f,f=32,i=1,s=1,v=1,z=40;AAD//w==\x1b\\" ++
+        "\x1b_Ga=a,i=1,r=1,z=30\x1b\\" ++
+        "\x1b_Ga=a,i=1,s=3\x1b\\";
+    terminal_c.vt_write(t, cmds.ptr, cmds.len);
+
+    var graphics: KittyGraphics = undefined;
+    try testing.expectEqual(Result.success, terminal_c.get(t, .kitty_graphics, @ptrCast(&graphics)));
+
+    const Snapshot = struct {
+        gen: u64,
+        pixel: [4]u8,
+
+        fn read(g: KittyGraphics) !@This() {
+            const img = image_get_handle(g, 1) orelse return error.TestUnexpectedResult;
+            var gen: u64 = 0;
+            var ptr: [*]const u8 = undefined;
+            try testing.expectEqual(Result.success, image_get(img, .generation, @ptrCast(&gen)));
+            try testing.expectEqual(Result.success, image_get(img, .data_ptr, @ptrCast(&ptr)));
+            return .{ .gen = gen, .pixel = ptr[0..4].* };
+        }
+    };
+    const red: [4]u8 = .{ 255, 0, 0, 255 };
+    const blue: [4]u8 = .{ 0, 0, 255, 255 };
+
+    // The first tick starts the first frame's 30ms timer.
+    var next: u64 = 0;
+    const s0 = try Snapshot.read(graphics);
+    try testing.expectEqualSlices(u8, &red, &s0.pixel);
+    try testing.expectEqual(Result.success, animation_tick(graphics, 1000, &next));
+    try testing.expectEqual(@as(u64, 1030), next);
+    try testing.expectEqual(s0, try Snapshot.read(graphics));
+
+    // An early tick changes nothing and reports the same time.
+    try testing.expectEqual(Result.success, animation_tick(graphics, 1010, &next));
+    try testing.expectEqual(@as(u64, 1030), next);
+    try testing.expectEqual(s0, try Snapshot.read(graphics));
+
+    // On time, the blue frame shows with a new generation.
+    try testing.expectEqual(Result.success, animation_tick(graphics, 1030, &next));
+    try testing.expectEqual(@as(u64, 1070), next);
+    const s1 = try Snapshot.read(graphics);
+    try testing.expectEqualSlices(u8, &blue, &s1.pixel);
+    try testing.expect(s1.gen > s0.gen);
+
+    // It then loops back to the first frame.
+    try testing.expectEqual(Result.success, animation_tick(graphics, 1070, &next));
+    try testing.expectEqual(@as(u64, 1100), next);
+    const s2 = try Snapshot.read(graphics);
+    try testing.expectEqualSlices(u8, &red, &s2.pixel);
+    try testing.expect(s2.gen > s1.gen);
+
+    // After a stop command (a=a,s=1) the tick reports nothing to
+    // play and leaves next_ms and the image alone.
+    const stop = "\x1b_Ga=a,i=1,s=1\x1b\\";
+    terminal_c.vt_write(t, stop.ptr, stop.len);
+    try testing.expectEqual(Result.success, terminal_c.get(t, .kitty_graphics, @ptrCast(&graphics)));
+    next = 42;
+    try testing.expectEqual(Result.no_value, animation_tick(graphics, 1100, &next));
+    try testing.expectEqual(@as(u64, 42), next);
+    try testing.expectEqual(s2, try Snapshot.read(graphics));
+}
+
+test "animation_tick without animations returns no value" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    var t: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer terminal_c.free(t);
+
+    var graphics: KittyGraphics = undefined;
+    var next: u64 = 0;
+
+    // Empty storage.
+    try testing.expectEqual(Result.success, terminal_c.get(t, .kitty_graphics, @ptrCast(&graphics)));
+    try testing.expectEqual(Result.no_value, animation_tick(graphics, 0, &next));
+
+    // A placed static image.
+    const transmit = "\x1b_Ga=T,f=32,i=1,s=1,v=1,c=1,r=1;/wAA/w==\x1b\\";
+    terminal_c.vt_write(t, transmit.ptr, transmit.len);
+    try testing.expectEqual(Result.success, terminal_c.get(t, .kitty_graphics, @ptrCast(&graphics)));
+    try testing.expectEqual(Result.no_value, animation_tick(graphics, 0, &next));
+    try testing.expectEqual(Result.no_value, animation_tick(graphics, 1000, &next));
+}
+
+test "animation_tick null out returns invalid_value" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    var t: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer terminal_c.free(t);
+
+    var graphics: KittyGraphics = undefined;
+    try testing.expectEqual(Result.success, terminal_c.get(t, .kitty_graphics, @ptrCast(&graphics)));
+    try testing.expectEqual(Result.invalid_value, animation_tick(graphics, 0, null));
 }

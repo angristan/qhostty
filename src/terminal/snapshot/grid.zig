@@ -269,7 +269,7 @@ pub const Row = packed struct(u8) {
 /// values (for example semantic content 3) without instantiating an invalid
 /// native enum.
 pub const Cell = packed struct(u64) {
-    kind: u2 = @intFromEnum(Kind.codepoint),
+    kind: u2 = @backingInt(Kind.codepoint),
     content: u24 = 0,
     style_id: u16 = 0,
     width: u2 = 0,
@@ -302,7 +302,7 @@ pub const Cell = packed struct(u64) {
 
         /// The number of bytes transporting one cell word.
         pub fn size(self: EncodedWidth) usize {
-            return @as(usize, 1) << @intFromEnum(self);
+            return @as(usize, 1) << @backingInt(self);
         }
 
         /// The integer type transporting one cell word.
@@ -444,7 +444,7 @@ const native_matches_wire = native: {
 /// Whether rows of cells can be copied between native and wire storage
 /// without per-cell transformation.
 const bulk_codec = native_matches_wire and
-    builtin.cpu.arch.endian() == .little;
+    builtin.target.cpu.arch.endian() == .little;
 
 pub const EncodeError = std.Io.Writer.Error || error{
     /// Wide and spacer cells do not form a valid row.
@@ -468,25 +468,21 @@ pub fn encode(
         const row = page.getRow(y);
         const cells = page.getCells(row);
 
-        // Trailing default cells decode implicitly. Wide/spacer pairs and
+        // Trailing default cells decode implicitly: wide/spacer pairs and
         // hyperlinked or styled cells are always nonzero, so eliding the
-        // zero suffix never drops encoded state.
-        const count: usize = count: {
-            var i: usize = cells.len;
-            while (i > 0) : (i -= 1) {
-                if (!cells[i - 1].isZero()) break :count i;
-            }
-            break :count 0;
-        };
+        // zero suffix never drops encoded state. The scan also accumulates
+        // the OR of the row's cell words to select its encoded cell width.
+        const count: usize, const word_or: u64 = scanRow(cells);
 
         // Validate the wide state of every encoded cell so we don't encode
-        // corrupt data, and accumulate the OR of the row's cell words to
-        // select its encoded cell width. Trailing default cells are narrow,
-        // so checking the encoded prefix against the full row width covers
-        // every pair.
-        var word_or: u64 = 0;
-        for (cells[0..count], 0..) |*cell, x| {
-            switch (cell.wide) {
+        // corrupt data. The width bits of the OR word witness whether any
+        // encoded cell is non-narrow at all; rows without them, the common
+        // case, satisfy every pair rule vacuously. Trailing default cells
+        // are narrow, so checking the encoded prefix against the full row
+        // width covers every pair.
+        const wide_mask: u64 = comptime @bitCast(Cell{ .width = 3 });
+        if (word_or & wide_mask != 0) {
+            for (cells[0..count], 0..) |*cell, x| switch (cell.wide) {
                 .narrow => {},
                 .wide => if (x + 1 == cells.len or
                     cells[x + 1].wide != .spacer_tail)
@@ -501,21 +497,66 @@ pub fn encode(
                 .spacer_head => if (x + 1 != cells.len or !row.wrap) {
                     return error.InvalidWideCell;
                 },
-            }
-            word_or |= classifyWord(cell);
+            };
         }
 
         // Canonical rows use the smallest admissible width.
         const cell_width: Cell.EncodedWidth = .select(word_or);
 
+        const row_header: Row = .{
+            .wrap = row.wrap,
+            .wrap_continuation = row.wrap_continuation,
+            .semantic_prompt = @backingInt(row.semantic_prompt),
+            .cell_width = cell_width,
+        };
+
+        // The bulk codec emits the row header and its encoded cells directly
+        // into the destination's spare buffer capacity, so a row costs no
+        // writer call at all instead of one for the header and one per cell
+        // chunk.
+        if (comptime bulk_codec) emit: {
+            const words: [*]const u64 = @ptrCast(cells.ptr);
+            switch (cell_width) {
+                inline .one, .two, .four => |width| {
+                    const size = comptime width.size();
+                    const needed = 3 + count * size;
+                    if (writer.unusedCapacityLen() < needed) break :emit;
+                    const out = writer.unusedCapacitySlice()[0..needed];
+                    out[0] = @bitCast(row_header);
+                    std.mem.writeInt(u16, out[1..3], @intCast(count), .little);
+                    encodeNarrowInto(width, words, count, out[3..]);
+                    writer.advance(needed);
+                    continue;
+                },
+                .eight => {
+                    // Hyperlink IDs live in a native side table, but we
+                    // embed them in ours, so if we have any hyperlinks we
+                    // need to fall back to the loop below.
+                    const witness: Cell = @bitCast(word_or);
+                    if (!witness.hyperlink and witness.hyperlink_id == 0) {
+                        const needed = 3 + count * 8;
+                        if (writer.unusedCapacityLen() < needed) break :emit;
+                        const out = writer.unusedCapacitySlice()[0..needed];
+                        out[0] = @bitCast(row_header);
+                        std.mem.writeInt(
+                            u16,
+                            out[1..3],
+                            @intCast(count),
+                            .little,
+                        );
+                        @memcpy(
+                            out[3..],
+                            std.mem.sliceAsBytes(cells[0..count]),
+                        );
+                        writer.advance(needed);
+                        continue;
+                    }
+                },
+            }
+        }
+
         // Row header: flags then the encoded cell count.
         {
-            const row_header: Row = .{
-                .wrap = row.wrap,
-                .wrap_continuation = row.wrap_continuation,
-                .semantic_prompt = @intFromEnum(row.semantic_prompt),
-                .cell_width = cell_width,
-            };
             var header_bytes: [3]u8 = undefined;
             header_bytes[0] = @bitCast(row_header);
             std.mem.writeInt(u16, header_bytes[1..3], @intCast(count), .little);
@@ -559,6 +600,47 @@ pub fn encode(
     try encodeGraphemes(page, writer);
 }
 
+/// The encoded cell count (through the last nonzero cell) and the bitwise
+/// OR of every encoded cell word for one row.
+fn scanRow(cells: []const TerminalCell) struct { usize, u64 } {
+    if (comptime bulk_codec) {
+        const words: [*]const u64 = @ptrCast(cells.ptr);
+        const V = @Vector(4, u64);
+        const VPtr = *align(@alignOf(u64)) const V;
+
+        // Count the zero cells using vectorized instructions
+        var count = cells.len;
+        while (count >= 4) {
+            const tail = @as(VPtr, @ptrCast(words + count - 4)).*;
+            if (@reduce(.Or, tail) != 0) break;
+            count -= 4;
+        }
+        while (count > 0 and words[count - 1] == 0) count -= 1;
+
+        // Accumulate the OR of the classifaction vectorized, with the
+        // scalar tail continuing from where the vector loop stopped.
+        const word_or: u64 = word_or: {
+            var acc: V = @splat(0);
+            var i: usize = 0;
+            while (i + 4 <= count) : (i += 4) {
+                acc |= @as(VPtr, @ptrCast(words + i)).*;
+            }
+            var word_or: u64 = @reduce(.Or, acc);
+            while (i < count) : (i += 1) word_or |= words[i];
+            break :word_or word_or;
+        };
+
+        return .{ count, word_or };
+    }
+
+    // Scalar path, count backwards
+    var count: usize = cells.len;
+    while (count > 0 and cells[count - 1].isZero()) count -= 1;
+    var word_or: u64 = 0;
+    for (cells[0..count]) |*cell| word_or |= classifyWord(cell);
+    return .{ count, word_or };
+}
+
 /// The word used to select a row's encoded cell width. This is the cell's
 /// wire word with the hyperlink flag reflecting the native cell, so linked
 /// cells and nonzero native padding disqualify every narrow width.
@@ -584,33 +666,89 @@ fn encodeNarrowCells(
     var i: usize = 0;
     while (i < cells.len) {
         const n = @min(cells.len - i, chunk.len / size);
-
-        if (comptime native_matches_wire) {
-            // A pure truncating loop over integers that the compiler can
-            // vectorize.
-            const words: [*]const u64 = @ptrCast(cells.ptr);
-            for (0..n) |j| {
-                std.mem.writeInt(
-                    width.Int(),
-                    chunk[j * size ..][0..size],
-                    width.truncate(words[i + j]),
-                    .little,
-                );
-            }
-        } else {
-            for (cells[i..][0..n], 0..) |*cell, j| {
-                std.mem.writeInt(
-                    width.Int(),
-                    chunk[j * size ..][0..size],
-                    width.truncate(classifyWord(cell)),
-                    .little,
-                );
-            }
+        for (cells[i..][0..n], 0..) |*cell, j| {
+            std.mem.writeInt(
+                width.Int(),
+                chunk[j * size ..][0..size],
+                width.truncate(classifyWord(cell)),
+                .little,
+            );
         }
-
         try writer.writeAll(chunk[0 .. n * size]);
         i += n;
     }
+}
+
+/// Truncate one row's cell words into `out` at the given encoded width.
+fn encodeNarrowInto(
+    comptime width: Cell.EncodedWidth,
+    words: [*]const u64,
+    count: usize,
+    out: []u8,
+) void {
+    comptime assert(bulk_codec);
+    const size = comptime width.size();
+    const V = @Vector(2, u64);
+    const shift: V = @splat(comptime switch (width) {
+        .one, .two => @bitOffsetOf(Cell, "content"),
+        .four => 0,
+        .eight => unreachable,
+    });
+    const mask: @Vector(size * 4, i32) = comptime mask: {
+        var mask: [size * 4]i32 = undefined;
+        for (0..2) |lane| {
+            for (0..size) |byte| {
+                mask[lane * size + byte] = @intCast(lane * 8 + byte);
+                mask[(lane + 2) * size + byte] =
+                    ~@as(i32, @intCast(lane * 8 + byte));
+            }
+        }
+        break :mask mask;
+    };
+
+    var j: usize = 0;
+    while (j + 4 <= count) : (j += 4) encodeNarrowStep(
+        width,
+        words,
+        j,
+        out,
+        shift,
+        mask,
+    );
+    // The remainder is written scalar-by-scalar. Re-running a vector step
+    // at `count - 4` would overlap stores with the previous step, which
+    // the backend may legally merge into one wider store that runs past
+    // the end of `out` (observed corrupting adjacent allocator metadata).
+    while (j < count) : (j += 1) {
+        std.mem.writeInt(
+            width.Int(),
+            out[j * size ..][0..size],
+            width.truncate(words[j]),
+            .little,
+        );
+    }
+}
+
+/// Emit four truncated cell words starting at cell index `j`.
+inline fn encodeNarrowStep(
+    comptime width: Cell.EncodedWidth,
+    words: [*]const u64,
+    j: usize,
+    out: []u8,
+    shift: @Vector(2, u64),
+    mask: @Vector(width.size() * 4, i32),
+) void {
+    const size = comptime width.size();
+    const VPtr = *align(@alignOf(u64)) const @Vector(2, u64);
+    const lo: @Vector(16, u8) = @bitCast(@as(VPtr, @ptrCast(words + j)).* >> shift);
+    const hi: @Vector(16, u8) = @bitCast(@as(VPtr, @ptrCast(words + j + 2)).* >> shift);
+
+    // Copy with an explicit length. Storing the shuffle result directly
+    // through a vector pointer lets the backend widen the store past the
+    // end of `out` (observed corrupting adjacent allocator metadata when
+    // the last vector step lands at the destination's buffer end).
+    const encoded: [size * 4]u8 = @bitCast(@shuffle(u8, lo, hi, mask));
+    @memcpy(out[j * size ..][0 .. size * 4], &encoded);
 }
 
 /// Encode the grapheme suffix section for every kind 1 cell in the grid.
@@ -618,36 +756,57 @@ fn encodeGraphemes(
     page: *const TerminalPage,
     writer: *std.Io.Writer,
 ) EncodeError!void {
-    // Count and validate entries before the section header so the count is
-    // always exact. Rows without the native grapheme hint contain no
-    // grapheme cells in any intact page.
-    var entries: u32 = 0;
-    for (0..page.size.rows) |y| {
-        const row = page.getRow(y);
-        if (!row.grapheme) continue;
-        for (page.getCells(row)) |*cell| {
-            if (!cell.hasGrapheme()) continue;
-            const cps = page.lookupGrapheme(cell) orelse unreachable;
-            if (cps.len > std.math.maxInt(u16)) return error.TooManyGraphemes;
-            entries += 1;
-        }
-    }
-
-    try io.writeInt(writer, u32, entries);
+    // Every grapheme cell owns exactly one entry in the page's grapheme
+    // map, so the section header comes straight from the page without a
+    // counting pass over the grid. Rows without the native grapheme hint
+    // contain no grapheme cells in any intact page.
+    const entries = page.graphemeCount();
+    try io.writeInt(writer, u32, @intCast(entries));
     if (entries == 0) return;
 
+    // Entries are batched into a local buffer so hot pages perform one
+    // writer call per flush instead of several per entry.
+    var buffer: [4096]u8 = undefined;
+    var used: usize = 0;
+    var emitted: usize = 0;
     for (0..page.size.rows) |y| {
         const row = page.getRow(y);
         if (!row.grapheme) continue;
         for (page.getCells(row), 0..) |*cell, x| {
             if (!cell.hasGrapheme()) continue;
             const cps = page.lookupGrapheme(cell) orelse unreachable;
-            try io.writeInt(writer, u16, @intCast(y));
-            try io.writeInt(writer, u16, @intCast(x));
-            try io.writeInt(writer, u16, @intCast(cps.len));
-            for (cps) |cp| try io.writeInt(writer, u32, cp);
+            if (cps.len > std.math.maxInt(u16)) return error.TooManyGraphemes;
+            emitted += 1;
+
+            const needed = 6 + cps.len * 4;
+            if (buffer.len - used < needed) {
+                try writer.writeAll(buffer[0..used]);
+                used = 0;
+            }
+            if (needed > buffer.len) {
+                // An entry larger than the whole buffer streams directly.
+                try io.writeInt(writer, u16, @intCast(y));
+                try io.writeInt(writer, u16, @intCast(x));
+                try io.writeInt(writer, u16, @intCast(cps.len));
+                for (cps) |cp| try io.writeInt(writer, u32, cp);
+                continue;
+            }
+
+            std.mem.writeInt(u16, buffer[used..][0..2], @intCast(y), .little);
+            std.mem.writeInt(u16, buffer[used + 2 ..][0..2], @intCast(x), .little);
+            std.mem.writeInt(u16, buffer[used + 4 ..][0..2], @intCast(cps.len), .little);
+            used += 6;
+            for (cps) |cp| {
+                std.mem.writeInt(u32, buffer[used..][0..4], cp, .little);
+                used += 4;
+            }
         }
     }
+    try writer.writeAll(buffer[0..used]);
+
+    // The declared count is trusted by decoders for framing, so the grid
+    // must have produced exactly that many entries.
+    assert(emitted == entries);
 }
 
 pub const DecodeError = std.Io.Reader.Error || error{
@@ -707,13 +866,21 @@ pub fn decode(
             break :header .{ row_header, count };
         };
 
+        // A fully default row needs no work at all: decoded pages start
+        // zeroed, which is exactly the default row and cell state.
+        if (@as(u8, @bitCast(row_header)) == 0 and count == 0) continue;
+
+        // Update the row fields through one load and store instead of a
+        // read-modify-write per packed field.
         const row = page.getRow(y);
-        row.wrap = row_header.wrap;
-        row.wrap_continuation = row_header.wrap_continuation;
-        row.semantic_prompt = std.enums.fromInt(
+        var row_value = row.*;
+        row_value.wrap = row_header.wrap;
+        row_value.wrap_continuation = row_header.wrap_continuation;
+        row_value.semantic_prompt = std.enums.fromInt(
             TerminalRow.SemanticPrompt,
             row_header.semantic_prompt,
         ) orelse .none;
+        row.* = row_value;
 
         const cells = page.getCells(row);
         if (count > cells.len) return error.InvalidRowCellCount;
@@ -727,7 +894,7 @@ pub fn decode(
                 reader,
                 cells[0..count],
             ),
-            .four => try decodeWordCells(
+            .four => _ = try decodeWordCells(
                 .four,
                 page,
                 row,
@@ -747,7 +914,9 @@ pub fn decode(
                     try reader.readSliceAll(
                         std.mem.sliceAsBytes(cells[0..count]),
                     );
+                    var row_or: u64 = 0;
                     for (0..count) |x| {
+                        row_or |= words[x];
                         applyCell(
                             page,
                             row,
@@ -758,8 +927,9 @@ pub fn decode(
                             hyperlink_remap,
                         );
                     }
+                    normalizeWideRow(.eight, row, cells, count, row_or);
                 } else {
-                    try decodeWordCells(
+                    _ = try decodeWordCells(
                         .eight,
                         page,
                         row,
@@ -825,8 +995,34 @@ fn widenCells(
 ) void {
     const size = comptime width.size();
 
+    // With the bulk codec layout this is a pure widening store: sixteen
+    // transported bytes per step, shuffling each pair of encoded values
+    // into u64 lane position against a zero vector and shifting them into
+    // the content field. Zig 0.16 disables loop auto-vectorization, so the
+    // scalar loop would issue one widening store per cell.
+    if (comptime bulk_codec) {
+        const words: [*]u64 = @ptrCast(cells.ptr);
+        const step = 16 / size;
+        var i: usize = 0;
+        while (i + step <= cells.len) : (i += step) {
+            widenStep(width, bytes, words, i);
+        }
+        if (i < cells.len) {
+            if (cells.len >= step) {
+                // Reprocess the final full window with overlapping stores,
+                // which rewrite the same widened values.
+                widenStep(width, bytes, words, cells.len - step);
+            } else {
+                while (i < cells.len) : (i += 1) {
+                    words[i] = width.extend(widenValue(width, bytes[i * size ..]));
+                }
+            }
+        }
+        return;
+    }
+
     // When the native cell matches the wire word, this is a pure widening
-    // loop over integers that the compiler can vectorize.
+    // loop over integers.
     if (comptime native_matches_wire) {
         const words: [*]u64 = @ptrCast(cells.ptr);
         for (0..cells.len) |i| {
@@ -837,6 +1033,58 @@ fn widenCells(
 
     for (cells, 0..) |*cell, i| {
         storeCell(cell, width.extend(widenValue(width, bytes[i * size ..])));
+    }
+}
+
+/// Widen sixteen transported bytes into their cell words at cell index `i`:
+/// shuffle each pair of encoded values into u64 lane position against a
+/// zero vector, then shift the value into the content field. Width two
+/// first degrades surrogate lanes to U+FFFD, matching `widenValue`.
+inline fn widenStep(
+    comptime width: Cell.EncodedWidth,
+    bytes: []const u8,
+    words: [*]u64,
+    i: usize,
+) void {
+    const size = comptime width.size();
+    const step = 16 / size;
+
+    var in: @Vector(16, u8) = @as(
+        *align(1) const @Vector(16, u8),
+        @ptrCast(bytes[i * size ..].ptr),
+    ).*;
+
+    // Width two admits surrogates, which degrade to U+FFFD exactly
+    // like `widenValue`. Width one cannot encode an invalid scalar.
+    if (comptime width == .two) {
+        const values: @Vector(8, u16) = @bitCast(in);
+        const invalid = (values & @as(@Vector(8, u16), @splat(0xF800))) ==
+            @as(@Vector(8, u16), @splat(0xD800));
+        in = @bitCast(@select(
+            u16,
+            invalid,
+            @as(@Vector(8, u16), @splat(0xFFFD)),
+            values,
+        ));
+    }
+
+    const zero: @Vector(16, u8) = @splat(0);
+    inline for (0..step / 2) |pair| {
+        const mask: @Vector(16, i32) = comptime mask: {
+            var mask: [16]i32 = @splat(~@as(i32, 0));
+            for (0..size) |byte| {
+                mask[byte] = @intCast((2 * pair) * size + byte);
+                mask[8 + byte] = @intCast((2 * pair + 1) * size + byte);
+            }
+            break :mask mask;
+        };
+        const lanes: @Vector(2, u64) = @bitCast(
+            @shuffle(u8, in, zero, mask),
+        );
+        @as(
+            *align(@alignOf(u64)) @Vector(2, u64),
+            @ptrCast(words + i + 2 * pair),
+        ).* = lanes << @splat(@bitOffsetOf(Cell, "content"));
     }
 }
 
@@ -858,6 +1106,9 @@ inline fn widenValue(
 
 /// Decode one row of width-four or fallback full-width cells through the
 /// complete per-cell normalization path.
+///
+/// Returns the bitwise OR of every decoded wire word so callers can gate
+/// the trailing wide-pair resolution pass without a second scan.
 fn decodeWordCells(
     comptime width: Cell.EncodedWidth,
     page: *TerminalPage,
@@ -867,8 +1118,9 @@ fn decodeWordCells(
     reader: *std.Io.Reader,
     style_remap: *const StyleRemap,
     hyperlink_remap: *const HyperlinkRemap,
-) DecodeError!void {
+) DecodeError!u64 {
     const size = comptime width.size();
+    var row_or: u64 = 0;
 
     // The staged payload path has the complete row buffered.
     const total = count * size;
@@ -880,6 +1132,7 @@ fn decodeWordCells(
                 bytes[x * size ..][0..size],
                 .little,
             ));
+            row_or |= bits;
             applyCell(
                 page,
                 row,
@@ -891,12 +1144,14 @@ fn decodeWordCells(
             );
         }
         reader.toss(total);
-        return;
+        normalizeWideRow(width, row, cells, count, row_or);
+        return row_or;
     }
 
     // Streaming sources fall back to per-cell reads.
     for (0..count) |x| {
         const bits = width.extend(try io.readInt(reader, width.Int()));
+        row_or |= bits;
         applyCell(
             page,
             row,
@@ -907,6 +1162,28 @@ fn decodeWordCells(
             hyperlink_remap,
         );
     }
+    normalizeWideRow(width, row, cells, count, row_or);
+    return row_or;
+}
+
+/// Resolve wide-pair relationships for one decoded row.
+///
+/// Cell decoding stores every cell unresolved, so this pass applies
+/// `normalizeWide` in order, which is equivalent to interleaving it with
+/// the stores. Rows whose word OR carries no wide bits are already
+/// normalized: every cell is narrow. Width four and narrower transports
+/// cannot encode wide bits at all, so those rows skip the check entirely.
+inline fn normalizeWideRow(
+    comptime width: Cell.EncodedWidth,
+    row: *const TerminalRow,
+    cells: []TerminalCell,
+    count: usize,
+    row_or: u64,
+) void {
+    if (comptime width != .eight) return;
+    const wide_mask: u64 = comptime @bitCast(Cell{ .width = 3 });
+    if (row_or & wide_mask == 0) return;
+    for (0..count) |x| normalizeWide(row, cells, x);
 }
 
 /// Whether the value is a valid Unicode scalar value.
@@ -916,10 +1193,10 @@ inline fn validScalar(cp: u32) bool {
 
 /// Normalize one encoded cell word and store it at `cells[x]`.
 ///
-/// This owns every per-cell decode rule except grapheme suffixes: content
-/// validation, reserved-value degradation, style and hyperlink remapping
-/// with reference counting, and wide-pair normalization against already
-/// decoded neighbors.
+/// This owns every per-cell decode rule except grapheme suffixes and
+/// wide-pair resolution: content validation, reserved-value degradation,
+/// and style and hyperlink remapping with reference counting. Callers run
+/// `normalizeWideRow` over the stored row afterward.
 fn applyCell(
     page: *TerminalPage,
     row: *TerminalRow,
@@ -935,7 +1212,6 @@ fn applyCell(
     // reference counting, or table lookups.
     if (bits_wire == 0) {
         storeCell(cell, 0);
-        normalizeWide(row, cells, x);
         return;
     }
 
@@ -949,11 +1225,11 @@ fn applyCell(
     wire.hyperlink_id = 0;
     wire.hyperlink = false;
 
-    switch (@as(Cell.Kind, @enumFromInt(wire.kind))) {
+    switch (@as(Cell.Kind, @fromBackingInt(wire.kind))) {
         // Kind 1 differs from 0 only by declaring a grapheme suffix section
         // entry, which reattaches through the native grapheme APIs later.
         .codepoint, .codepoint_grapheme => {
-            wire.kind = @intFromEnum(Cell.Kind.codepoint);
+            wire.kind = @backingInt(Cell.Kind.codepoint);
             if (!validScalar(wire.content)) wire.content = 0xFFFD;
 
             // Kitty image and placement state is not part of this snapshot
@@ -973,7 +1249,7 @@ fn applyCell(
     }
 
     // Reserved semantic content degrades to plain output.
-    wire.semantic_content = @intFromEnum(std.enums.fromInt(
+    wire.semantic_content = @backingInt(std.enums.fromInt(
         TerminalCell.SemanticContent,
         wire.semantic_content,
     ) orelse .output);
@@ -1003,8 +1279,6 @@ fn applyCell(
             page.hyperlink_set.release(page.memory, link_native);
         };
     }
-
-    normalizeWide(row, cells, x);
 }
 
 /// Resolve wide-pair relationships for the cell at `x` against its already
@@ -1046,9 +1320,23 @@ fn decodeGraphemes(
 ) DecodeError!void {
     const entries = try io.readInt(reader, u32);
     for (0..entries) |_| {
-        const y = try io.readInt(reader, u16);
-        const x = try io.readInt(reader, u16);
-        const cp_count = try io.readInt(reader, u16);
+        // The staged and borrowed payload paths have every header buffered.
+        const y: u16, const x: u16, const cp_count: u16 = header: {
+            if (reader.bufferedLen() >= 6) {
+                const bytes = reader.buffered()[0..6];
+                defer reader.toss(6);
+                break :header .{
+                    std.mem.readInt(u16, bytes[0..2], .little),
+                    std.mem.readInt(u16, bytes[2..4], .little),
+                    std.mem.readInt(u16, bytes[4..6], .little),
+                };
+            }
+            break :header .{
+                try io.readInt(reader, u16),
+                try io.readInt(reader, u16),
+                try io.readInt(reader, u16),
+            };
+        };
 
         // Resolve the target cell. Entries whose target cannot carry a
         // suffix are optional detail: their codepoints are consumed to
@@ -1070,29 +1358,65 @@ fn decodeGraphemes(
             break :target .{ .row = row, .cell = cell };
         };
 
-        // Always consume every declared codepoint. Invalid scalars and NUL are
-        // not meaningful grapheme suffix components and are ignored. If native
-        // capacity is exhausted, remove any prefix already attached so the
-        // cell never exposes a truncated cluster.
-        var accept = target != null;
-        for (0..cp_count) |_| {
-            const cp = try io.readInt(reader, u32);
-            if (!accept) continue;
-            if (cp == 0 or !validScalar(cp)) continue;
+        // Always consume every declared codepoint. Invalid scalars and NUL
+        // are not meaningful grapheme suffix components and are ignored. A
+        // dropped entry's codepoints are discarded in bulk.
+        const resolved = target orelse {
+            try reader.discardAll(@as(usize, cp_count) * 4);
+            continue;
+        };
 
-            page.appendGrapheme(
-                target.?.row,
-                target.?.cell,
-                @intCast(cp),
-            ) catch {
-                if (target.?.cell.hasGrapheme()) {
-                    page.clearGrapheme(target.?.cell);
-                    page.updateRowGraphemeFlag(target.?.row);
-                }
-                accept = false;
-            };
+        var accept = true;
+        var index: usize = 0;
+        while (index < cp_count) {
+            const buffered = reader.buffered();
+            if (buffered.len >= 4) {
+                const n = @min(cp_count - index, buffered.len / 4);
+                for (0..n) |i| applyGraphemeSuffix(
+                    page,
+                    resolved.row,
+                    resolved.cell,
+                    &accept,
+                    std.mem.readInt(u32, buffered[i * 4 ..][0..4], .little),
+                );
+                reader.toss(n * 4);
+                index += n;
+            } else {
+                applyGraphemeSuffix(
+                    page,
+                    resolved.row,
+                    resolved.cell,
+                    &accept,
+                    try io.readInt(reader, u32),
+                );
+                index += 1;
+            }
         }
     }
+}
+
+/// Attach one decoded suffix codepoint to its resolved target cell.
+///
+/// If native capacity is exhausted, any prefix already attached is removed
+/// so the cell never exposes a truncated cluster, and `accept` latches
+/// false so the entry's remaining codepoints are consumed but dropped.
+fn applyGraphemeSuffix(
+    page: *TerminalPage,
+    row: *TerminalRow,
+    cell: *TerminalCell,
+    accept: *bool,
+    cp: u32,
+) void {
+    if (!accept.*) return;
+    if (cp == 0 or !validScalar(cp)) return;
+
+    page.appendGrapheme(row, cell, @intCast(cp)) catch {
+        if (cell.hasGrapheme()) {
+            page.clearGrapheme(cell);
+            page.updateRowGraphemeFlag(row);
+        }
+        accept.* = false;
+    };
 }
 
 /// The encoded word for one native cell and its hyperlink ID.
@@ -1105,7 +1429,7 @@ fn cellBits(cell: TerminalCell, link_id: TerminalHyperlinkId) u64 {
     }
 
     const wire: Cell = .{
-        .kind = @intFromEnum(cell.content_tag),
+        .kind = @backingInt(cell.content_tag),
         .content = switch (cell.content_tag) {
             .codepoint,
             .codepoint_grapheme,
@@ -1144,7 +1468,7 @@ fn storeCell(cell: *TerminalCell, bits: u64) void {
 
     const wire: Cell = @bitCast(bits);
     var native: TerminalCell = .init(0);
-    switch (@as(Cell.Kind, @enumFromInt(wire.kind))) {
+    switch (@as(Cell.Kind, @fromBackingInt(wire.kind))) {
         .codepoint, .codepoint_grapheme => native.content = .{
             .codepoint = .{ .data = @intCast(wire.content) },
         },
@@ -1164,9 +1488,9 @@ fn storeCell(cell: *TerminalCell, bits: u64) void {
         },
     }
     native.style_id = wire.style_id;
-    native.wide = @enumFromInt(wire.width);
+    native.wide = @fromBackingInt(wire.width);
     native.protected = wire.protected;
-    native.semantic_content = @enumFromInt(wire.semantic_content);
+    native.semantic_content = @fromBackingInt(wire.semantic_content);
     cell.* = native;
 }
 
@@ -1190,13 +1514,18 @@ fn Remap(comptime Id: type) type {
         /// Tracks IDs that received an entry, including ones mapped to the
         /// default, so callers can give duplicate table entries first-wins
         /// semantics.
-        seen: std.DynamicBitSetUnmanaged,
+        seen: std.bit_set.Dynamic,
+
+        /// A remap with no entries at all: every lookup is unmapped. Use
+        /// this instead of `init` when the encoded table is empty so pages
+        /// without styles or hyperlinks allocate nothing.
+        pub const empty: Self = .{ .entries = &.{}, .seen = .{} };
 
         pub fn init(alloc: Allocator) Allocator.Error!Self {
             const entries = try alloc.alloc(Id, capacity);
             errdefer alloc.free(entries);
             @memset(entries, 0);
-            const seen = try std.DynamicBitSetUnmanaged.initEmpty(
+            const seen = try std.bit_set.Dynamic.initEmpty(
                 alloc,
                 capacity,
             );
@@ -1204,25 +1533,29 @@ fn Remap(comptime Id: type) type {
         }
 
         pub fn deinit(self: *Self, alloc: Allocator) void {
-            alloc.free(self.entries);
-            self.seen.deinit(alloc);
+            if (self.entries.len != 0) {
+                alloc.free(self.entries);
+                self.seen.deinit(alloc);
+            }
             self.* = undefined;
         }
 
-        /// Record one encoded-to-native mapping.
+        /// Record one encoded-to-native mapping. Illegal on `empty`.
         pub fn put(self: *Self, encoded: Id, native: Id) void {
             assert(!self.seen.isSet(encoded));
             self.entries[encoded] = native;
             self.seen.set(encoded);
         }
 
-        /// Whether the encoded ID already has an entry, even a default one.
+        /// Whether the encoded ID already has an entry, even a default
+        /// one. Illegal on `empty`.
         pub fn contains(self: *const Self, encoded: Id) bool {
             return self.seen.isSet(encoded);
         }
 
         /// The native ID for an encoded ID, or zero when unmapped.
         pub inline fn get(self: *const Self, encoded: Id) Id {
+            if (self.entries.len == 0) return 0;
             return self.entries[encoded];
         }
     };

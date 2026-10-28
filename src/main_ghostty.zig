@@ -58,7 +58,7 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
     defer global.deinit();
     const alloc = global.alloc();
 
-    if (comptime builtin.mode == .Debug) {
+    if (comptime builtin.mode == .debug) {
         std.log.warn("This is a debug build. Performance will be very poor.", .{});
         std.log.warn("You should only use a debug build for developing Ghostty.", .{});
         std.log.warn("Otherwise, please rebuild in a release mode.", .{});
@@ -140,16 +140,17 @@ fn logFn(
             .err => .fault,
         };
 
-        // Initialize a logger. This is slow to do on every operation
-        // but we shouldn't be logging too much.
-        const logger = macos.os.Log.create(build_config.bundle_id, @tagName(scope));
-        defer logger.release();
-        logger.log(std.heap.c_allocator, mac_level, prefix ++ format, args);
+        macosLogger(scope).log(
+            std.heap.c_allocator,
+            mac_level,
+            prefix ++ format,
+            args,
+        );
     }
 
     stderr: {
         // don't log debug messages to stderr unless we are a debug build
-        if (comptime builtin.mode != .Debug and level == .debug) break :stderr;
+        if (comptime builtin.mode != .debug and level == .debug) break :stderr;
 
         // skip if we are not logging to stderr
         if (!global.logging().stderr) break :stderr;
@@ -166,6 +167,37 @@ fn logFn(
     }
 }
 
+/// Returns the macOS unified logging logger for the given scope. The
+/// logger is created once per scope and cached for the lifetime of the
+/// process, because os_log object creation is slow (it shows up in
+/// startup profiles when done per log call) and Apple's guidance is to
+/// create loggers once and reuse them.
+fn macosLogger(comptime scope: @TypeOf(.EnumLiteral)) *macos.os.Log {
+    const S = struct {
+        var cached: std.atomic.Value(?*macos.os.Log) = .init(null);
+    };
+
+    if (S.cached.load(.acquire)) |v| return v;
+
+    // Create and attempt to store our logger. If we race with another
+    // thread then we use theirs and release ours.
+    const created = macos.os.Log.create(
+        build_config.bundle_id,
+        @tagName(scope),
+    );
+    if (S.cached.cmpxchgStrong(
+        null,
+        created,
+        .acq_rel,
+        .acquire,
+    )) |existing| {
+        created.release();
+        return existing.?;
+    }
+
+    return created;
+}
+
 pub const std_options: std.Options = .{
     // Our log level is always at least info in every build mode.
     //
@@ -174,7 +206,7 @@ pub const std_options: std.Options = .{
     // calculate and we want to make sure they're optimized out in
     // builds.
     .log_level = switch (builtin.mode) {
-        .Debug => .debug,
+        .debug => .debug,
         else => .info,
     },
 
@@ -196,7 +228,7 @@ pub const std_options: std.Options = .{
     .allow_stack_tracing = if (builtin.target.os.tag.isDarwin() and builtin.target.os.tag != .macos)
         false
     else
-        builtin.strip_debug_info,
+        !builtin.strip_debug_info,
 };
 
 test {

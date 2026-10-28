@@ -17,7 +17,7 @@ const gtk = @import("gtk.zig");
 const GitVersion = @import("GitVersion.zig");
 
 /// Standard build configuration options.
-optimize: std.builtin.OptimizeMode,
+optimize: std.lang.Optimize,
 target: std.Build.ResolvedTarget,
 xcframework_target: XCFrameworkTarget = .universal,
 wasm_target: WasmTarget,
@@ -40,6 +40,11 @@ exe_entrypoint: ExeEntrypoint = .ghostty,
 version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 },
 lib_version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 },
 
+/// The absolute path the Ghostty executable is installed at, for the Linux
+/// desktop, D-Bus and systemd files that launch it. Null means they name
+/// the executable alone.
+installed_exe_path: ?[]const u8 = null,
+
 /// Binary properties
 pie: bool = false,
 strip: bool = false,
@@ -61,6 +66,10 @@ emit_themes: bool = false,
 emit_xcframework: bool = false,
 emit_webdata: bool = false,
 emit_unicode_table_gen: bool = false,
+
+/// Feature gates for libghostty-vt artifacts (-Dvt-features). The full
+/// Ghostty application ignores this and always enables everything.
+vt_features: TerminalBuildOptions.Features = .{},
 
 /// True when Ghostty is being built as a dependency of another project
 /// rather than as the root project.
@@ -104,6 +113,36 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
             var query = result.query;
             query.abi = .msvc;
             result = b.resolveTargetQuery(query);
+        }
+
+        // On wasm, default to enabling the simd128 feature. Every
+        // browser engine has supported it since 2023 or earlier
+        // (Chrome 91, Firefox 89, Safari 16.4) and it is a large
+        // performance win for the terminal hot paths (50%+ on
+        // print-heavy VT streams). Only apply when no explicit CPU
+        // was requested; targets for exotic non-browser runtimes
+        // can opt out with `-Dcpu=generic`.
+        if (result.result.cpu.arch.isWasm() and
+            result.query.cpu_model == .determined_by_arch_os and
+            result.query.cpu_features_add.isEmpty() and
+            result.query.cpu_features_sub.isEmpty())
+        {
+            var query = result.query;
+            query.cpu_features_add.addFeature(
+                @backingInt(std.Target.wasm.Feature.simd128),
+            );
+            result = b.resolveTargetQuery(query);
+        }
+
+        // The full Ghostty build no longer supports iOS; Fail early
+        // with a clear message rather than partway through the build.
+        if (result.result.os.tag == .ios and !emit_lib_vt) {
+            std.log.err(
+                "iOS is not a supported target for the full Ghostty build; " ++
+                    "only libghostty-vt supports iOS (-Demit-lib-vt)",
+                .{},
+            );
+            return error.UnsupportedTarget;
         }
 
         // If we have no minimum OS version, we set the default based on
@@ -206,9 +245,10 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         "simd",
         "Build with SIMD-accelerated code paths. Results in significant performance improvements.",
     ) orelse simd: {
-        // We can't build our SIMD dependencies for Wasm. Note that we may
-        // still use SIMD features in the Wasm-builds.
-        if (target.result.cpu.arch.isWasm()) break :simd false;
+        // We can't build our SIMD dependencies for Wasm or freestanding
+        // targets. Note that we may still use SIMD features in the Wasm-builds.
+        if (target.result.cpu.arch.isWasm() or
+            target.result.os.tag == .freestanding) break :simd false;
 
         break :simd true;
     };
@@ -317,6 +357,27 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
     else
         try std.SemanticVersion.parse(libVersion);
 
+    // The install prefix is only known once the build runs, too late to
+    // write it into the files that launch Ghostty, so a build installing
+    // anywhere systemd doesn't search has to say where the executable goes.
+    config.installed_exe_path = b.option(
+        []const u8,
+        "installed-exe-path",
+        "Absolute path the ghostty executable will be installed at, written " ++
+            "into the Linux desktop, D-Bus and systemd files. If not specified, " ++
+            "they name the executable alone, which systemd only finds in " ++
+            "/usr/bin or /usr/local/bin.",
+    );
+    if (config.installed_exe_path) |exe_path| {
+        if (!std.fs.path.isAbsolute(exe_path)) {
+            std.log.err(
+                "-Dinstalled-exe-path must be an absolute path, got '{s}'",
+                .{exe_path},
+            );
+            return error.InvalidInstalledExePath;
+        }
+    }
+
     //---------------------------------------------------------------
     // Binary Properties
 
@@ -333,22 +394,39 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
     // may be fixed in 0.17.0. We may want to revisit this afterwards; although
     // I'm not too sure if that helps to clean up rpath, this may just be the
     // better option. See https://codeberg.org/ziglang/zig/issues/31760.
-    if ((target.result.os.tag == .linux) and target.query.isNativeCpu()) {
-        const in_nix_shell = env.get("IN_NIX_SHELL") != null;
-        if (b.option(
-            bool,
-            "patchelf",
-            "Patch interpreter and rpath in the built binary (default if IN_NIX_SHELL is set)",
-        ) orelse in_nix_shell) {
-            var patchelf: PatchElf = .{};
-            if (b.findProgram(&.{"ld.so"}, &.{})) |ld_so| {
-                patchelf.interp = std.Io.Dir.realPathFileAbsoluteAlloc(b.graph.io, ld_so, b.allocator) catch null;
-            } else |_| {}
-            if (env.get("LD_LIBRARY_PATH")) |ld_library_path| {
-                patchelf.rpath = if (ld_library_path.len > 0) ld_library_path else null;
-            }
-            if (patchelf.interp != null or patchelf.rpath != null) {
-                config.patchelf = patchelf;
+    if (b.option(
+        []const u8,
+        "patch-interp",
+        "Inject the supplied path as the dynamic linker in the built binary. " ++
+            "Under Nix, this defaults to the dynamic linker found in PATH.",
+    )) |interp| {
+        PatchElf.setInterp(&config, interp);
+    } else patch_interp: {
+        if (!(target.result.os.tag == .linux) or !target.query.isNativeCpu()) break :patch_interp;
+        if (env.get("IN_NIX_SHELL") == null) break :patch_interp;
+
+        if (b.findProgram(.{ .names = &.{"ld.so"} })) |ld_so| {
+            PatchElf.setInterp(
+                &config,
+                std.Io.Dir.realPathFileAbsoluteAlloc(b.graph.io, ld_so, b.allocator) catch break :patch_interp,
+            );
+        } else {}
+    }
+
+    if (b.option(
+        []const u8,
+        "patch-rpath",
+        "Inject the supplied colon-delimited search path as the rpath in the built binary. " ++
+            "This defaults to LD_LIBRARY_PATH if we're in a Nix shell environment.",
+    )) |rpath| {
+        PatchElf.setRpath(&config, rpath);
+    } else patch_rpath: {
+        if (!(target.result.os.tag == .linux) or !target.query.isNativeCpu()) break :patch_rpath;
+        if (env.get("IN_NIX_SHELL") == null) break :patch_rpath;
+
+        if (env.get("LD_LIBRARY_PATH")) |ld_library_path| {
+            if (ld_library_path.len > 0) {
+                PatchElf.setRpath(&config, ld_library_path);
             }
         }
     }
@@ -364,15 +442,39 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         "strip",
         "Strip the final executable. Default true for fast and small releases",
     ) orelse switch (optimize) {
-        .Debug => false,
-        .ReleaseSafe => false,
-        .ReleaseFast, .ReleaseSmall => true,
+        .debug => false,
+        .safe => false,
+        .fast, .small => true,
     };
 
     //---------------------------------------------------------------
     // Artifacts to Emit
 
     config.emit_lib_vt = emit_lib_vt;
+
+    config.vt_features = features: {
+        const list = b.option(
+            []const u8,
+            "vt-features",
+            "Comma-separated libghostty-vt feature modifications applied " ++
+                "to the default all-enabled set, -Dcpu style: `+feature` " ++
+                "or `feature` enables, `-feature` disables, and `all` " ++
+                "means every feature (e.g. `-all,+render-state` for a " ++
+                "render-only build). Only applies to lib artifacts.",
+        ) orelse break :features .{};
+        break :features TerminalBuildOptions.Features.parse(list) catch {
+            var valid: std.ArrayList(u8) = .empty;
+            inline for (@typeInfo(TerminalBuildOptions.Features).@"struct".field_names) |name| {
+                if (valid.items.len > 0) try valid.appendSlice(b.allocator, ", ");
+                try valid.appendSlice(b.allocator, name);
+            }
+            std.log.err(
+                "-Dvt-features={s} contains an unknown feature. Valid features: all, {s}",
+                .{ list, valid.items },
+            );
+            return error.UnknownVtFeature;
+        };
+    };
 
     config.emit_exe = b.option(
         bool,
@@ -432,8 +534,8 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
     ) orelse switch (target.result.os.tag) {
         .windows => true,
         else => switch (optimize) {
-            .Debug => true,
-            .ReleaseSafe, .ReleaseFast, .ReleaseSmall => false,
+            .debug => true,
+            .safe, .fast, .small => false,
         },
     };
 
@@ -442,8 +544,8 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         "emit-termcap",
         "Install Ghostty termcap file",
     ) orelse switch (optimize) {
-        .Debug => true,
-        .ReleaseSafe, .ReleaseFast, .ReleaseSmall => false,
+        .debug => true,
+        .safe, .fast, .small => false,
     };
 
     config.emit_themes = b.option(
@@ -543,6 +645,24 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
 const PatchElf = struct {
     interp: ?[]const u8 = null,
     rpath: ?[]const u8 = null,
+
+    fn setInterp(config: *Config, interp: []const u8) void {
+        if (config.patchelf) |*patchelf| {
+            patchelf.interp = interp;
+            return;
+        }
+
+        config.patchelf = .{ .interp = interp };
+    }
+
+    fn setRpath(config: *Config, rpath: []const u8) void {
+        if (config.patchelf) |*patchelf| {
+            patchelf.rpath = rpath;
+            return;
+        }
+
+        config.patchelf = .{ .rpath = rpath };
+    }
 };
 
 /// Add a patchelf step for the supplied `artifact`, depending on the supplied
@@ -584,17 +704,19 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     // accommodate realistic large branch names for dev versions.
     var app_version_buf: [1024]u8 = undefined;
     step.addOption(std.SemanticVersion, "app_version", self.version);
-    step.addOption([:0]const u8, "app_version_string", try std.fmt.bufPrintZ(
+    step.addOption([:0]const u8, "app_version_string", try std.mem.printSentinel(
         &app_version_buf,
         "{f}",
         .{self.version},
+        0,
     ));
     var lib_version_buf: [1024]u8 = undefined;
     step.addOption(std.SemanticVersion, "lib_version", self.lib_version);
-    step.addOption([:0]const u8, "lib_version_string", try std.fmt.bufPrintZ(
+    step.addOption([:0]const u8, "lib_version_string", try std.mem.printSentinel(
         &lib_version_buf,
         "{f}",
         .{self.lib_version},
+        0,
     ));
     step.addOption(
         ReleaseChannel,
@@ -612,22 +734,28 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
 pub fn terminalOptions(
     self: *const Config,
     artifact: TerminalBuildOptions.Artifact,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) TerminalBuildOptions {
     return .{
         .artifact = artifact,
         .simd = self.simd,
         .oniguruma = true,
         .c_abi = false,
+        // The application requires every feature; only lib artifacts
+        // may trim them.
+        .features = switch (artifact) {
+            .ghostty => .{},
+            .lib => self.vt_features,
+        },
         .version = switch (artifact) {
             .ghostty => self.version,
             .lib => self.lib_version,
         },
         .slow_runtime_safety = switch (optimize) {
-            .Debug => true,
-            .ReleaseSafe,
-            .ReleaseSmall,
-            .ReleaseFast,
+            .debug => true,
+            .safe,
+            .small,
+            .fast,
             => false,
         },
     };
@@ -696,13 +824,6 @@ pub fn osVersionMin(tag: std.Target.Os.Tag) ?std.Target.Query.OsVersion {
             .patch = 0,
         } },
 
-        // The full Ghostty path compiles metal shaders that require iOS 14.
-        .ios => .{ .semver = .{
-            .major = 14,
-            .minor = 0,
-            .patch = 0,
-        } },
-
         // This should never happen currently. If we add a new target then
         // we should add a new case here.
         else => null,
@@ -713,7 +834,8 @@ pub fn osVersionMin(tag: std.Target.Os.Tag) ?std.Target.Query.OsVersion {
 ///
 /// This should only be used for Darwin targets.
 pub fn osVersionMinLibVt(tag: std.Target.Os.Tag) ?std.Target.Query.OsVersion {
-    // lib-vt has no newer deployment target requirement.
+    // lib-vt is the only thing we still build for iOS, so its deployment
+    // target lives here rather than in osVersionMin.
     if (tag == .ios) return .{ .semver = .{ .major = 13, .minor = 0, .patch = 0 } };
     return osVersionMin(tag);
 }

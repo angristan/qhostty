@@ -3,12 +3,31 @@
 #include <QKeyEvent>
 #include <QString>
 
+#include <string_view>
+
 uint32_t ghosttyUnshiftedCodepoint(const QKeyEvent& event) {
   const int qtKey = event.key();
   if (qtKey >= Qt::Key_A && qtKey <= Qt::Key_Z) {
     return static_cast<uint32_t>('a' + qtKey - Qt::Key_A);
   }
   if (qtKey >= 0x20 && qtKey < 0x01000000) {
+    if (event.modifiers().testFlag(Qt::ShiftModifier) &&
+        !event.modifiers().testFlag(Qt::KeypadModifier)) {
+      // Qt reports the shifted character as the key (Shift+2 is '@'). The
+      // core needs the unshifted one to know that Shift produced the text.
+      // The number row is identified by position (xkb codes 10..19 are
+      // 1234567890); other symbols use the US layout pairs.
+      const quint32 scanCode = event.nativeScanCode();
+      if (scanCode >= 10 && scanCode <= 19 && !(qtKey >= '0' && qtKey <= '9')) {
+        return static_cast<uint32_t>(scanCode == 19 ? '0' : '1' + scanCode - 10);
+      }
+      static constexpr std::string_view shifted = "_+{}|:\"<>?~";
+      static constexpr std::string_view unshifted = "-=[]\\;',./`";
+      const size_t index = shifted.find(static_cast<char>(qtKey));
+      if (qtKey < 0x80 && index != std::string_view::npos) {
+        return static_cast<uint32_t>(unshifted[index]);
+      }
+    }
     return static_cast<uint32_t>(qtKey);
   }
   return 0;

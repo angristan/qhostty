@@ -22,7 +22,7 @@ Qt application
 ├── QApplication and QMainWindow
 ├── QTabBar and QStackedWidget
 ├── QSplitter
-└── Qt OpenGL terminal surface
+└── Qt OpenGL terminal surface (paints exported frames)
         │
         ▼
 Ghostty embedded C API
@@ -31,9 +31,9 @@ Ghostty embedded C API
 Ghostty core, PTY, fonts, configuration, and renderer
 ```
 
-The Qt application will live in a separate `qt/` directory. It will link to Ghostty through the embedded C API.
+The Qt application lives in a separate `qt/` directory. It links to Ghostty through the embedded C API.
 
-The embedded runtime must gain a Linux OpenGL platform bridge. This bridge will provide the current OpenGL context, function loading, framebuffer target, redraw scheduling, and surface lifecycle callbacks.
+Ghostty's renderer owns its OpenGL context and render thread. It exports each finished frame as a DMABUF, or as CPU pixels when the host cannot import one, and the Qt surface takes the latest frame and paints it. See [docs/frame-presentation.md](docs/frame-presentation.md).
 
 ## Milestone 0: Project foundation (complete)
 
@@ -48,6 +48,8 @@ The embedded runtime must gain a Linux OpenGL platform bridge. This bridge will 
 ## Milestone 1: OpenGL proof of concept (complete)
 
 This is the main technical risk and must be solved before other frontend work.
+
+The original bridge made Qt's OpenGL context current and had Ghostty draw into the widget's framebuffer on the GUI thread. After the sync with Ghostty v1.4.0 this was replaced by upstream's render-thread design, where Qt imports finished frames. The list below records the original proof of concept. The current design is in [docs/frame-presentation.md](docs/frame-presentation.md).
 
 - Add a Linux/OpenGL platform type to the embedded API.
 - Create an OpenGL 4.3 context through Qt.
@@ -139,8 +141,9 @@ Still needs broader hardware coverage:
 
 - Keep `upstream` pointed at `ghostty-org/ghostty`.
 - Keep Qt code under `qt/`.
-- Keep shared-core patches limited to the embedded API, renderer bridge, and build integration.
-- Rebase onto upstream regularly and keep history linear.
+- Keep shared-core patches limited to the embedded API and build integration. Do not patch the renderer. Adopt upstream's hand-off design instead.
+- Sync by merging `upstream/main` on a branch. Keep the merge commit to conflict resolution only and put Qhostty changes in separate commits. See [docs/upstream-sync.md](docs/upstream-sync.md).
+- Follow upstream's `minimum_zig_version`.
 - Pin each Qhostty release to a known Ghostty revision.
 
 ## Initial release scope

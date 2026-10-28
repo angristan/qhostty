@@ -32,7 +32,7 @@ Qhostty currently provides:
 
 ## What Qt replaces
 
-GTK4 becomes Qt 6 Widgets: `QOpenGLWidget` for the terminal surface, `QSplitter` for splits, `QTabBar` for tabs, `QMessageBox` for dialogs.
+GTK4 becomes Qt 6 Widgets: `QOpenGLWidget` for the terminal surface (it paints frames that Ghostty's renderer exports, see [docs/frame-presentation.md](docs/frame-presentation.md)), `QSplitter` for splits, `QTabBar` for tabs, `QMessageBox` for dialogs.
 
 libadwaita is dropped rather than reimplemented. Its widgets become plain Qt ones, and its styling role falls to the desktop's own Qt style, which is Breeze under Plasma. That is why Qhostty looks native on KDE without depending on anything from KDE.
 
@@ -40,7 +40,7 @@ The optional KDE Frameworks packages cover only what Qt has no portable API for:
 
 ## Build
 
-Requirements: Zig 0.16, CMake 3.25 or newer, Ninja, Qt 6.5 or newer with Core, DBus, Gui, Network, Widgets, OpenGL, and OpenGLWidgets, Fontconfig, a C++20 compiler, and OpenGL 4.3.
+Requirements: Zig 0.17 (the version in Ghostty's `build.zig.zon`), CMake 3.25 or newer, Ninja, Qt 6.5 or newer with Core, DBus, Gui, Network, Widgets, OpenGL, and OpenGLWidgets, Fontconfig, a C++20 compiler, and OpenGL 4.3.
 
 LayerShellQt, KF6WindowSystem, and KF6GlobalAccel are optional at build time. They enable exact Plasma quick-terminal placement, KWin effects, and KDE global shortcuts.
 
@@ -91,4 +91,4 @@ A Plasma Wayland smoke test must cover shell rendering, keyboard shortcuts, IME 
 - The package temporarily reuses Ghostty's icon and depends on Ghostty terminfo and shell-integration packages.
 - NVIDIA, ibus, fcitx, CJK input, and 200% scaling still need broader manual hardware coverage.
 
-See [PLAN.md](PLAN.md) for the roadmap. Qhostty is independent from the official Ghostty project and uses the [MIT license](LICENSE).
+See [PLAN.md](PLAN.md) for the roadmap and [docs/upstream-sync.md](docs/upstream-sync.md) for how the fork tracks Ghostty. Qhostty is independent from the official Ghostty project and uses the [MIT license](LICENSE).
